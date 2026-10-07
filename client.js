@@ -85,7 +85,7 @@ const BASE = absoluteBase
       } catch { /* 报告本身绝不能影响功能 */ }
     }
     // 客户端版本戳：重启 DSH 后可以在 /state 的 clientReports 里确认加载的是哪一版
-    const CLIENT_BUILD = 'client-2026-10-07-1320'
+    const CLIENT_BUILD = 'client-2026-10-07-2010'
     reportHost('bundle-evaluated', { at: Date.now(), href: String(location?.href ?? '').slice(0, 120), build: CLIENT_BUILD, features: 'wb-tab,batch-del,big-nav,artist-sets,ctx-menu' })
 
     try {
@@ -280,9 +280,11 @@ const BASE = absoluteBase
       // 一律先当 pending：宿主给的 status 可能已经过时（图还没真画好），靠轮询拿真实状态
       const [state, setState] = useState('pending')
       const [error, setError] = useState('')
-      // 图片自身加载失败（后端可能返回 404，或地址解析不对）—— 兜底显示，不给用户看破图
+      // 图片自身加载失败 —— 最常见的原因是「作业已报 done，但文件还没写完」，这一小段窗口里
+      // 取图会返回 404。所以这里**自动重试**，别一失败就给用户看"取不到"。
       const [imgError, setImgError] = useState('')
       const [imgNonce, setImgNonce] = useState(0)
+      const [imgRetry, setImgRetry] = useState(0)
 
       useEffect(() => {
         if (!plan.jobId || state === 'done') return undefined
@@ -302,17 +304,30 @@ const BASE = absoluteBase
         return () => { cancelled = true; if (timer) clearTimeout(timer) }
       }, [plan.jobId])
 
+      // 取图失败自动重试：最多 20 次 / 约 30 秒，之后才把「重试」按钮交给用户
+      useEffect(() => {
+        if (!imgError || imgRetry >= 20) return undefined
+        const timer = setTimeout(() => { setImgError(''); setImgRetry(n => n + 1); setImgNonce(x => x + 1) }, 1500)
+        return () => clearTimeout(timer)
+      }, [imgError, imgRetry])
+
       if (state === 'done') {
         const src = BASE + '/jobs?id=' + encodeURIComponent(plan.jobId) + '&image=1'
-        if (imgError) {
+        // 自动重试用尽后才显示"取不到"
+        if (imgError && imgRetry >= 20) {
           return h('div', { style: wrapStyle },
             h('span', { style: noteStyle }, '第 ' + (index + 1) + ' 张图取不到（' + imgError + '）　'),
             h('button', {
               type: 'button',
               style: { fontSize: '12px', padding: '3px 12px', borderRadius: '8px', border: '1px solid rgba(160,180,210,.5)', background: 'transparent', color: '#dbe3ee', cursor: 'pointer' },
-              onClick: () => { setImgError(''); setImgNonce(x => x + 1) },
+              onClick: () => { setImgError(''); setImgRetry(0); setImgNonce(x => x + 1) },
             }, '重试'),
           )
+        }
+        // 正在自动重试中：给个安静的状态，不要露出破图
+        if (imgError) {
+          return h('div', { style: wrapStyle },
+            h('span', { style: noteStyle }, '🎨 第 ' + (index + 1) + ' 张正在取回…（第 ' + imgRetry + ' 次）'))
         }
         return h('div', { style: wrapStyle },
           h('img', { key: 'img-' + imgNonce, src, loading: 'lazy', decoding: 'async', alt: plan.title || '插图',
@@ -882,7 +897,7 @@ function versionsOf(jobId) {
           const r = await jsonFetch(BASE + '/plan', {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ messageId, turn, text, sessionId }),
+            body: JSON.stringify({ messageId, turn, text, sessionId, manual: true }),
           })
           const list = r.plans ?? []
           if (!list.length) { setState('failed'); setNote(r.error || '没有产出画面'); return }
@@ -931,12 +946,25 @@ function versionsOf(jobId) {
         )))
       }
 
-      // 没有图：整段交给宿主渲染一次（不切段、不加重排），和原生完全一样
+      // 没有计划、也没有待显示的图：正文照常渲染出来，不要返回 null。
+      // ⚠️ 宿主（message-frame.js 的 renderTavernProjection）只检查渲染器**函数**的返回值：
+      //    不是 null/undefined 就直接采用，不会再回落原生渲染。所以"返回 null 交回宿主"
+      //    只在 renderAssistantText 那一层成立，在 PlannedBody 这一层不成立 —— 在这里
+      //    返回 null 会让整段正文空白（2026-10-07 踩过）。
+      if (!jobIds.length) {
+        return h(Segment, {
+          key: 'rphub-plain',
+          value: text,
+          index: 0,
+          renderText,
+          keyName: 'rphub-plain-' + String(messageId ?? 'x'),
+          messageId, turn, sessionId,
+        })
+      }
       const body = renderText(text, 'rphub-body-' + String(messageId ?? 'x'))
-      const canDraw = String(text ?? '').trim().length >= 12
       return h(React.Fragment, null,
         body,
-        jobIds.length ? h('div', { style: { margin: '6px 0 12px' } },
+        h('div', { style: { margin: '6px 0 12px' } },
           jobIds.map(id => h('img', {
             key: id,
             src: BASE + '/jobs?id=' + encodeURIComponent(id) + '&image=1',
@@ -944,13 +972,44 @@ function versionsOf(jobId) {
             onClick: () => viewImage(id, ''),
           })),
           progress < jobIds.length ? h('div', { style: { fontSize: '11px', color: '#9aa3b2' } }, '画好了 ' + progress + ' / ' + jobIds.length) : null,
-        ) : null,
+        ),
       )
     }
 
     /** 渲染器：有 image### 标记就走标记；没有就用 agent 规划。都没命中就返回 null。 */
     /** 已经主动规划过的消息，避免重复调模型 */
     const planEnsured = new Set()
+    /**
+     * 「自动生图」只认最新一轮，而且**要等渲染稳定下来**再动手。
+     *
+     * 为什么必须防抖：打开一个长会话时，历史消息是逐条渲染的，每一步的 turn 都比上一步大。
+     * 如果"见到更大的 turn 就规划"，一屏历史能一口气排出一串后台任务 —— 这个坑第一次上线就踩了
+     * （重启后冒出几十张图）。所以这里只记下见过的最大轮次，等 1.2 秒不再有更新的轮次出现，
+     * 它才真的是"最新一轮"，那时才去规划。
+     * turn 拿不到就什么都不做：宁可不自动，也不要乱触发。
+     */
+    let autoPlanSession = ''
+    let autoPlanTurn = -1
+    let autoPlanTimer = null
+    let autoPlanPending = null
+    function scheduleAutoPlan(sessionId, turn, messageId, text) {
+      const sid = String(sessionId ?? '')
+      if (sid !== autoPlanSession) { autoPlanSession = sid; autoPlanTurn = -1 }
+      const t = Number(turn)
+      if (!Number.isFinite(t) || t <= 0) return
+      if (t <= autoPlanTurn) return        // 比已见过的更旧：一定是历史消息，不规划
+      autoPlanTurn = t
+      autoPlanPending = { messageId, text, sessionId: sid, turn: t }
+      if (autoPlanTimer) clearTimeout(autoPlanTimer)
+      autoPlanTimer = setTimeout(() => {
+        autoPlanTimer = null
+        const job = autoPlanPending
+        autoPlanPending = null
+        // 期间又出现了更新的轮次 → 那一次会重新排，这次作废
+        if (!job || job.turn !== autoPlanTurn) return
+        ensurePlanFor(job.messageId, job.text, job.sessionId, job.turn)
+      }, 1200)
+    }
     /**
      * 渲染器一被调用就主动去要计划 —— 不等 React 组件挂载。
      * （React 那边会不会挂载取决于宿主，不能把规划押在它身上。）
@@ -990,7 +1049,11 @@ function versionsOf(jobId) {
     function renderAssistantText(text, context, options) {
       try {
         if (context?.sessionId) lastSessionId = String(context.sessionId)
-        if (!options?.plannerEnabled) return null
+        // 游玩正文一律接管（由 PlannedBody 决定是插图还是原样渲染）。
+        // ⚠️ 不能因为「生图规划」没开就不接管：手动点按钮生成的图正是靠这条链路
+        //    按挂载句插进正文的，不接管就永远只在消息下面显示。
+        //    接管之所以安全，是因为 PlannedBody 在没有图/标记时会自己把正文渲染出来
+        //    （见上面的 rphub-plain 分支），不会返回 null 吞掉正文。
         if (context?.streaming) return null
         const renderText = typeof context?.renderText === 'function' ? context.renderText : null
         if (!renderText) return null
@@ -1013,6 +1076,12 @@ function versionsOf(jobId) {
         // 不再依赖 turn：Tavern 的渲染链路只服务游玩对话，工作台/设置页不走这里，
         // 所以"只在游玩时出现"是天然成立的（之前按 turn 判定导致按钮永不出现）。
         reportHost('renderer-takeover', { messageId: String(context?.messageId ?? ''), turn: context?.turn, cardBench: Boolean(context?.cardBench), textLen: String(text ?? '').length })
+        // 「自动生图」：生图规划开着时，正文渲染稳定后替**最新一轮**要一次计划，不用点按钮。
+        //   短消息（工具回执、寒暄）不配图；历史消息不规划；连续渲染时只认最后停下来的那一轮。
+        // 「🎨 生图」按钮完全不受影响 —— 点它依然是对那一条消息单独生图、重新生图。
+        if (options?.plannerEnabled !== false && String(text ?? '').trim().length >= 200 && context?.messageId) {
+          scheduleAutoPlan(context.sessionId, context.turn, context.messageId, text)
+        }
         return h(PlannedBody, {
           text: String(text ?? ''),
           messageId: context?.messageId,
@@ -1065,7 +1134,7 @@ function versionsOf(jobId) {
           const r = await jsonFetch(BASE + '/plan', {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ messageId, turn, text, sessionId }),
+            body: JSON.stringify({ messageId, turn, text, sessionId, manual: true }),
           })
           const list = r.plans ?? []
           reportHost('plan-response', { ok: r?.ok, plans: list.length, error: r?.error ?? '' })
@@ -1208,7 +1277,7 @@ function versionsOf(jobId) {
           if (openImageOverlay) openImageOverlay({ open: true, jobIds: [], note: '', working: true })
           const r = await jsonFetch(BASE + '/plan', {
             method: 'POST', headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ sessionId: String(props?.sessionId ?? lastSessionId ?? ''), turn: 0 }),
+            body: JSON.stringify({ sessionId: String(props?.sessionId ?? lastSessionId ?? ''), turn: 0, manual: true }),
           })
           const ids = (r.plans || []).map(p => p.jobId).filter(Boolean)
           if (openImageOverlay) openImageOverlay({ open: true, jobIds: ids, note: ids.length ? ('本轮 ' + ids.length + ' 张') : (r.error || '没产出画面'), working: false })
@@ -1254,7 +1323,7 @@ function versionsOf(jobId) {
           const r = await jsonFetch(BASE + '/plan', {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ messageId, turn: props?.turn, sessionId }),
+            body: JSON.stringify({ messageId, turn: props?.turn, sessionId, manual: true }),
           })
           const list = r.plans || []
           if (!list.length) {
@@ -1482,7 +1551,7 @@ function versionsOf(jobId) {
           setBusy(true)
           setNote('正在按最新一条回复规划…')
           try {
-            const r = await post('/plan', { sessionId: lastSessionId })
+            const r = await post('/plan', { sessionId: lastSessionId, manual: true })
             const ids = (r.plans || []).map(p => p.jobId).filter(Boolean)
             if (!ids.length) { setNote('没有产出画面：' + (r.error || '模型没返回 <image> 块')); return }
             setNote('已提交 ' + ids.length + ' 张，正在画…')
@@ -1660,7 +1729,7 @@ function versionsOf(jobId) {
                 setNote('规划中…（要读规则 + 写提示词）')
                 setPlanRows(null)
                 try {
-                  const r = await post('/plan', { messageId: 'panel-' + Date.now(), turn: 0, text: planText })
+                  const r = await post('/plan', { messageId: 'panel-' + Date.now(), turn: 0, text: planText, manual: true })
                   setPlanRows(r.plans || [])
                   setNote(r.plans && r.plans.length ? ('规划出 ' + r.plans.length + ' 张，正在画…') : ('没产出：' + (r.error || '模型没按格式返回')))
                 } catch (e) { setNote('失败：' + (e && e.message ? e.message : e)) }
@@ -2987,27 +3056,9 @@ function versionsOf(jobId) {
           } catch {}
         }
       }, [])
-      // 收起状态：右下角一个常驻小按钮（不依赖任何侧栏槽位，一定能显示）
-      if (!open) {
-        return h('div', {
-          style: {
-            position: 'fixed', right: '18px', bottom: '86px', zIndex: 2147483000,
-            display: 'flex', flexDirection: 'column', gap: '6px', alignItems: 'flex-end',
-          },
-        },
-          h('button', {
-            title: '本地生图控制台（人物库 / 历史图 / 世界书 / 画风）',
-            style: {
-              display: 'flex', alignItems: 'center', gap: '6px',
-              background: '#161b23', color: '#e6ebf3',
-              border: '1px solid rgba(255,255,255,.18)', borderRadius: '999px',
-              padding: '9px 15px', cursor: 'pointer', fontSize: '13px',
-              boxShadow: '0 6px 20px rgba(0,0,0,.45)',
-            },
-            onClick: () => setOpen(true),
-          }, '🎨 本地生图'),
-        )
-      }
+      // 收起时不渲染任何东西：入口在左侧栏底部（见 ConsoleLauncher），
+      // 不再在右下角浮一个常驻按钮 —— 那个位置会盖住正文和面板。
+      if (!open) return null
       return h('div', {
         style: {
           position: 'fixed', inset: 0, zIndex: 2147483100,
@@ -3031,6 +3082,36 @@ function versionsOf(jobId) {
         ),
         h(SettingsPanel),
       ))
+    }
+
+    /**
+     * 侧栏底部的入口按钮 —— 和「卡片更新器」「错题库」排在一起（sidebar.footer.action，
+     * 即"设置"按钮旁边的动作区）。窄栏（56px 轨道，wide=false）时只留图标。
+     */
+    function ConsoleLauncher(props) {
+      const wide = props?.wide !== false
+      const [hover, setHover] = React.useState(false)
+      const open = () => { try { window.dispatchEvent(new CustomEvent('dsh-tavern-comfy:open-console')) } catch {} }
+      return h('button', {
+        type: 'button',
+        title: '本地生图控制台（人物库 / 历史图 / 世界书 / 画风）',
+        'aria-label': '本地生图',
+        onClick: open,
+        onMouseEnter: () => setHover(true),
+        onMouseLeave: () => setHover(false),
+        style: {
+          display: 'flex', alignItems: 'center', gap: '8px',
+          justifyContent: wide ? 'flex-start' : 'center',
+          width: '100%', margin: '2px 0',
+          background: hover ? 'rgba(255,255,255,.07)' : 'transparent',
+          border: 'none', color: 'inherit', cursor: 'pointer',
+          padding: wide ? '8px 10px' : '8px 0', borderRadius: '8px',
+          fontSize: '13px', textAlign: 'left',
+        },
+      },
+        h('span', { style: { fontSize: '15px', lineHeight: 1 } }, '🎨'),
+        wide ? h('span', null, '本地生图') : null,
+      )
     }
 
     function apply(ctx) {
@@ -3069,6 +3150,19 @@ function versionsOf(jobId) {
           reportHost('seat-registered', { seat: 'shell.overlay.console' })
         } catch (error) {
           reportHost('seat-failed', { seat: 'shell.overlay.console', error: String(error?.message ?? error).slice(0, 120) })
+        }
+
+        // ★ 侧栏底部入口：和「卡片更新器」「错题库」并排（设置按钮旁边那一排）
+        try {
+          ctx.slots?.inject?.('sidebar.footer.action', () => ctx.slots.register({
+            name: 'sidebar.footer.action',
+            id: 'dsh-tavern-comfy-launcher',
+            order: 48,
+            label: '本地生图',
+          }, ConsoleLauncher))
+          reportHost('seat-registered', { seat: 'sidebar.footer.action' })
+        } catch (error) {
+          reportHost('seat-failed', { seat: 'sidebar.footer.action', error: String(error?.message ?? error).slice(0, 120) })
         }
 
         // 全屏看图浮层
