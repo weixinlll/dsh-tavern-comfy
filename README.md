@@ -32,7 +32,7 @@
 
 ```bash
 cd ~/.dsh/profile-data/tavern/data/tools
-git clone https://github.com/weixinlu824-cpu/dsh-tavern-comfy.git rphub-comfy
+git clone https://github.com/weixinlu824-cpu/dsh-tavern-comfy.git
 ```
 
 **然后完整重启 DSH Desktop**（关掉整个程序再打开，不是刷新页面）。
@@ -42,8 +42,9 @@ git clone https://github.com/weixinlu824-cpu/dsh-tavern-comfy.git rphub-comfy
 下载本仓库，把文件夹放到：
 
 ```
-Windows:  C:\Users\weixinlu824-cpu\.dsh\profile-data\tavern\data\tools\rphub-comfy\
-macOS/Linux:  ~/.dsh/profile-data/tavern/data/tools/rphub-comfy/
+Windows:  C:\Users\weixinlu824-cpu\.dsh\profile-data\tavern\data\tools
+dsh-tavern-comfy\
+macOS/Linux:  ~/.dsh/profile-data/tavern/data/tools/dsh-tavern-comfy/
 ```
 
 **完整重启 DSH Desktop。**
@@ -256,7 +257,7 @@ API 根地址   [http://127.0.0.1:8188        ]
 ## 目录结构
 
 ```
-rphub-comfy/
+dsh-tavern-comfy/
 ├── package.json          插件清单
 ├── cordis.patch.yml      DSH 挂载配置
 ├── client.js             前端（设置面板 + 正文插图渲染）
