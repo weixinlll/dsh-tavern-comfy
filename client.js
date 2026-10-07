@@ -53,6 +53,10 @@ const BASE = absoluteBase
     const CRITICAL_REPORT_STAGES = new Set([
       'history-fail', 'history-ok', 'fetch-retry', 'state-fail',
       'window-error', 'unhandled-rejection',
+      // Tavern 官方接口的注册结果：一次会话只会报一次，而且必须能看到（否则没法判断渲染器到底装没装）
+      'tavernui-attached', 'tavernui-missing', 'tavernui-marker-registered', 'tavernui-marker-failed',
+      'tavernui-media-registered', 'tavernui-media-failed', 'tavernui-action-failed',
+      'apply-start', 'seat-registered', 'seat-failed',
     ])
 
     function reportFingerprint(stage, data) {
@@ -259,7 +263,7 @@ const BASE = absoluteBase
       if (state === 'done' && jobId) {
         const src = `${BASE}/jobs?id=${encodeURIComponent(jobId)}&image=1`
         return h('div', { style: wrapStyle },
-          h('img', { src, loading: 'lazy', decoding: 'async', alt: '插图', title: '点一下在 DSH 里看大图', style: { display: 'block', width: '100%', maxWidth: 'min(560px, 92%)', borderRadius: '10px', cursor: 'zoom-in', background: '#1a1d24', margin: '10px auto' }, onClick: () => viewImage(jobId, '') }))
+          h('img', { src, loading: 'lazy', decoding: 'async', alt: '插图', title: '点一下在 DSH 里看大图', style: { display: 'block', width: '100%', maxWidth: 'min(660px, 96%)', borderRadius: '10px', cursor: 'zoom-in', background: '#1a1d24', margin: '10px auto' }, onClick: () => viewImage(jobId, '') }))
       }
       if (state === 'failed') {
         return h('div', { style: wrapStyle },
@@ -331,7 +335,7 @@ const BASE = absoluteBase
         }
         return h('div', { style: wrapStyle },
           h('img', { key: 'img-' + imgNonce, src, loading: 'lazy', decoding: 'async', alt: plan.title || '插图',
-            onError: () => setImgError('加载失败'), title: '点一下在 DSH 里看大图', style: { display: 'block', width: '100%', maxWidth: 'min(560px, 92%)', borderRadius: '10px', cursor: 'zoom-in', background: '#1a1d24', margin: '10px auto' }, onClick: () => viewImage(plan.jobId, plan.title), onContextMenu: (event) => { event.preventDefault(); openEditorFor(plan.jobId, plan.title) }, onMouseDown: () => beginPress(plan.jobId, plan.title), onMouseUp: cancelPress, onMouseLeave: cancelPress, onTouchStart: () => beginPress(plan.jobId, plan.title), onTouchEnd: cancelPress, onTouchMove: cancelPress }))
+            onError: () => setImgError('加载失败'), title: '点一下在 DSH 里看大图', style: { display: 'block', width: '100%', maxWidth: 'min(660px, 96%)', borderRadius: '10px', cursor: 'zoom-in', background: '#1a1d24', margin: '10px auto' }, onClick: () => viewImage(plan.jobId, plan.title), onContextMenu: (event) => { event.preventDefault(); openEditorFor(plan.jobId, plan.title) }, onMouseDown: () => beginPress(plan.jobId, plan.title), onMouseUp: cancelPress, onMouseLeave: cancelPress, onTouchStart: () => beginPress(plan.jobId, plan.title), onTouchEnd: cancelPress, onTouchMove: cancelPress }))
       }
       if (state === 'failed') {
         return h('div', { style: wrapStyle },
@@ -339,6 +343,64 @@ const BASE = absoluteBase
       }
       return h('div', { style: wrapStyle },
         h('span', { style: noteStyle }, '🎨 正在画第 ' + (index + 1) + ' 张…' + (plan.title ? '「' + plan.title + '」' : '')))
+    }
+
+
+    /** 官方接口下的插图（kind = dsh-tavern-comfy/image）。
+     *  item.data 里带着 jobId —— 所以放大、右键看提示词、长按、重画全都照用。
+     *  官方内置的 image 类型做不到这些（尺寸和交互由 Tavern 固定，插件插不进手）。 */
+    function OfficialImage(props) {
+      const { item } = props
+      const jobId = String(item && item.data && item.data.jobId || '')
+      const title = String(item && item.caption || '')
+      const [imgError, setImgError] = useState('')
+      const [imgNonce, setImgNonce] = useState(0)
+      const [imgRetry, setImgRetry] = useState(0)
+
+      // 取图失败自动重试：宿主报 ready 之后文件可能还在写，这段窗口会 404
+      useEffect(() => {
+        if (!imgError || imgRetry >= 20) return undefined
+        const timer = setTimeout(() => { setImgError(''); setImgRetry(n => n + 1); setImgNonce(x => x + 1) }, 1500)
+        return () => clearTimeout(timer)
+      }, [imgError, imgRetry])
+
+      if (item && item.status === 'failed') {
+        return h('div', { style: wrapStyle },
+          h('span', { style: noteStyle }, '配图失败：' + String(item.error || '未知原因').slice(0, 120)))
+      }
+      const src = String(item && item.url || '') || (jobId ? BASE + '/jobs?id=' + encodeURIComponent(jobId) + '&image=1' : '')
+      if (!src || (item && item.status === 'pending')) {
+        return h('div', { style: wrapStyle },
+          h('span', { style: noteStyle }, '🎨 正在画…' + (title ? '「' + title + '」' : '')))
+      }
+      if (imgError && imgRetry >= 20) {
+        return h('div', { style: wrapStyle },
+          h('span', { style: noteStyle }, '图取不到（' + imgError + '）　'),
+          h('button', {
+            type: 'button',
+            style: { fontSize: '12px', padding: '3px 12px', borderRadius: '8px', border: '1px solid rgba(160,180,210,.5)', background: 'transparent', color: '#dbe3ee', cursor: 'pointer' },
+            onClick: () => { setImgError(''); setImgRetry(0); setImgNonce(x => x + 1) },
+          }, '重试'))
+      }
+      if (imgError) {
+        return h('div', { style: wrapStyle }, h('span', { style: noteStyle }, '🎨 正在取回…（第 ' + imgRetry + ' 次）'))
+      }
+      return h('div', { style: wrapStyle },
+        h('img', {
+          key: 'official-img-' + imgNonce, src, loading: 'lazy', decoding: 'async', alt: title || '插图',
+          onError: () => setImgError('加载失败'),
+          title: '点一下看大图 · 右键或长按改提示词 / 重画',
+          // 覆盖 tavern.css 的 .dsh-tavern-illustration img 限制（320x240）：
+          // 行内 style 优先级高于 CSS 类，所以这里写死 width/maxWidth/maxHeight 三件套。
+          style: { display: 'block', width: 'auto', height: 'auto', maxWidth: 'min(660px, 96vw)', maxHeight: 'none', borderRadius: '10px', cursor: 'zoom-in', background: '#1a1d24', margin: '10px 0' },
+          onClick: () => viewImage(jobId, title),
+          onContextMenu: event => { event.preventDefault(); openEditorFor(jobId, title) },
+          onMouseDown: () => beginPress(jobId, title),
+          onMouseUp: cancelPress, onMouseLeave: cancelPress,
+          onTouchStart: () => beginPress(jobId, title),
+          onTouchEnd: cancelPress, onTouchMove: cancelPress,
+        }),
+        title ? h('div', { style: { fontSize: '12px', color: '#9aa3b2', textAlign: 'center', margin: '-4px 0 12px' } }, title) : null)
     }
 
     /** 段落：只渲染正文，不再带「画这段」按钮（生图入口统一在消息下方）。 */
@@ -810,21 +872,33 @@ function versionsOf(jobId) {
     /**
      * 在 DSH 内部的全屏浮层里看某张图（不开浏览器标签）。
      */
-    function viewImage(jobId, title) {
+    async function viewImage(jobId, title) {
       try {
         if (!jobId) return
-        if (typeof openImageOverlay === 'function') {
-          // 这个位置可能重画过多次（旧版本都还在），把整条版本链带过去，默认看最新
-          const chain = typeof versionsOf === 'function' ? versionsOf(jobId) : [String(jobId)]
-          const label = String(title || '插图')
-          openImageOverlay({
-            open: true,
-            jobIds: chain,
-            note: chain.length > 1 ? (label + '（共 ' + chain.length + ' 版，◀ ▶ 对比）') : label,
-            working: false,
-            index: chain.length - 1,
-          })
-        }
+        if (typeof openImageOverlay !== 'function') return
+        // 翻页列表优先用"整场对话里出过图的作业"——这样在正文里点开也能左右翻上一张/下一张。
+        // 取不到、或这张不在列表里时，退回重画版本链。
+        let list = []
+        try {
+          const r = await jsonFetch(BASE + '/history')
+          const history = (r && Array.isArray(r.jobs)) ? r.jobs : []
+          list = history
+            .filter(job => job && job.id && (job.hasImage || job.byteLength))
+            .map(job => String(job.id))
+            .reverse()
+        } catch { /* 拿不到历史就退回版本链 */ }
+        if (!list.includes(String(jobId))) list = versionsOf(jobId)
+        const at = Math.max(0, list.indexOf(String(jobId)))
+        const label = String(title || '插图')
+        openImageOverlay({
+          open: true,
+          jobIds: list,
+          note: list.length > 1
+            ? (label + '（' + (at + 1) + '/' + list.length + '　◀ ▶ 或 ← → 翻页，滚轮缩放，按住拖动）')
+            : label,
+          working: false,
+          index: at,
+        })
       } catch { /* 看图失败不影响正文 */ }
     }
 
@@ -1079,9 +1153,9 @@ function versionsOf(jobId) {
         // 「自动生图」：生图规划开着时，正文渲染稳定后替**最新一轮**要一次计划，不用点按钮。
         //   短消息（工具回执、寒暄）不配图；历史消息不规划；连续渲染时只认最后停下来的那一轮。
         // 「🎨 生图」按钮完全不受影响 —— 点它依然是对那一条消息单独生图、重新生图。
-        if (options?.plannerEnabled !== false && String(text ?? '').trim().length >= 200 && context?.messageId) {
-          scheduleAutoPlan(context.sessionId, context.turn, context.messageId, text)
-        }
+        // 自动配图已由**宿主侧**的 Tavern 官方接口桥接管（tavern.onTurnSettled → 规划 → attach），
+        // 图由 Tavern 自己按 anchor 渲染并与正文版本绑定。前端不再在渲染时发起规划 ——
+        // 否则同一条正文会被规划两次、出两批图。手动按钮不受影响，仍然可用。
         return h(PlannedBody, {
           text: String(text ?? ''),
           messageId: context?.messageId,
@@ -1178,6 +1252,37 @@ function versionsOf(jobId) {
 
     function ImageOverlay() {
       const [view, setView] = React.useState({ open: false, jobIds: [], note: '', working: false, index: 0 })
+      // 缩放与平移：滚轮缩放、按住拖动（触摸同样支持）
+      const [zoom, setZoom] = React.useState(1)
+      const [pos, setPos] = React.useState({ x: 0, y: 0 })
+      const [dragging, setDragging] = React.useState(false)
+      const dragRef = React.useRef(null)
+      const onWheel = React.useCallback(event => {
+        event.preventDefault()
+        setZoom(z => Math.max(0.2, Math.min(8, z * (event.deltaY > 0 ? 0.9 : 1.1))))
+      }, [])
+      const onDragStart = React.useCallback(event => {
+        event.preventDefault()
+        dragRef.current = { x: event.clientX - pos.x, y: event.clientY - pos.y }
+        setDragging(true)
+      }, [pos.x, pos.y])
+      const onDragMove = React.useCallback(event => {
+        if (!dragRef.current) return
+        setPos({ x: event.clientX - dragRef.current.x, y: event.clientY - dragRef.current.y })
+      }, [])
+      const onDragEnd = React.useCallback(() => { dragRef.current = null; setDragging(false) }, [])
+      const onTouchStart = React.useCallback(event => {
+        const touch = event.touches && event.touches[0]
+        if (!touch) return
+        dragRef.current = { x: touch.clientX - pos.x, y: touch.clientY - pos.y }
+        setDragging(true)
+      }, [pos.x, pos.y])
+      const onTouchMove = React.useCallback(event => {
+        const touch = event.touches && event.touches[0]
+        if (!dragRef.current || !touch) return
+        event.preventDefault()
+        setPos({ x: touch.clientX - dragRef.current.x, y: touch.clientY - dragRef.current.y })
+      }, [])
       openImageOverlay = (next) => setView(current => Object.assign({}, current, next && next.open ? Object.assign({ index: 0 }, next) : next))
       const close = () => openImageOverlay({ open: false, jobIds: [], note: '', working: false, index: 0 })
       const total = view.jobIds.length
@@ -1196,6 +1301,8 @@ function versionsOf(jobId) {
         window.addEventListener('keydown', onKey)
         return () => window.removeEventListener('keydown', onKey)
       }, [view.open, at, total])
+      // 切图或重新打开时复位缩放与位移
+      React.useEffect(() => { setZoom(1); setPos({ x: 0, y: 0 }); dragRef.current = null }, [view.open, at])
       if (!view.open) return null
       const goPrev = () => go(-1)
       const goNext = () => go(1)
@@ -1256,11 +1363,21 @@ function versionsOf(jobId) {
             },
           }, '›') : null,
           // 一次只显示当前这张，左右按钮切换
+          // 一次只显示当前这张；可拖动平移、滚轮缩放
           view.jobIds.slice(at, at + 1).map(id => React.createElement('img', {
-            key: id, src: BASE + '/jobs?id=' + encodeURIComponent(id) + '&image=1',
+            key: id,
+            src: BASE + '/jobs?id=' + encodeURIComponent(id) + '&image=1',
             alt: view.note || '插图',
-            onClick: (event) => { event.stopPropagation(); if (total > 1) goNext() },
-            style: { display: 'block', maxWidth: '100%', maxHeight: 'calc(100vh - 132px)', width: 'auto', height: 'auto', objectFit: 'contain', borderRadius: '12px', background: '#1a1d24', cursor: total > 1 ? 'pointer' : 'default' },
+            draggable: false,
+            onWheel: onWheel, onMouseDown: onDragStart, onMouseMove: onDragMove, onMouseUp: onDragEnd,
+            onMouseLeave: onDragEnd, onTouchStart: onTouchStart, onTouchMove: onTouchMove, onTouchEnd: onDragEnd,
+            style: {
+              display: 'block', maxWidth: '100%', maxHeight: 'calc(100vh - 132px)', width: 'auto', height: 'auto',
+              objectFit: 'contain', borderRadius: '12px', background: '#1a1d24',
+              cursor: zoom > 1 ? 'grab' : 'default', userSelect: 'none', touchAction: 'none',
+              transform: 'translate(' + pos.x + 'px,' + pos.y + 'px) scale(' + zoom + ')',
+              transition: dragging ? 'none' : 'transform .12s',
+            },
           })),
         ),
         view.jobIds.length ? React.createElement('div', { style: { color: '#8b95a5', fontSize: '12px', textAlign: 'center', paddingBottom: '20px' } }, '点空白处关闭' + (total > 1 ? '　也可以点两侧的 ‹ › 或按 ← → 切换' : '')) : null,
@@ -3253,65 +3370,87 @@ function versionsOf(jobId) {
           console.warn('[dsh-tavern-comfy] 设置页面未注册:', error?.message)
         }
 
-        ctx.inject?.(['tavernAssistantTextRenderer'], owner => {
+        // ===== Tavern 官方浏览器接口（tavernUi，接口版本 1）=====
+        // 以前这里是打在 Tavern 上的补丁造出来的 tavernAssistantTextRenderer / registerActions，
+        // Tavern 一更新补丁被冲掉，正文里的图和按钮就会一起消失。
+        // 现在全部走正门：
+        //   · 正文 —— 不再接管，交回 Tavern 原生渲染
+        //   · 图   —— 由宿主侧用 tavern.attach 挂到正文的挂载句后面（Tavern 自己渲染、自己管版本）
+        //   · 按钮 —— tavernUi.registerMessageAction
+        ctx.inject?.(['tavernUi'], owner => {
+          const ui = owner.tavernUi
+          if (!ui || ui.apiVersion < 1) {
+            reportHost('tavernui-missing', { got: Boolean(ui) })
+            try { console.warn('[dsh-tavern-comfy] 当前 Tavern 没有 tavernUi 接口，生图按钮不可用') } catch {}
+            return
+          }
+          reportHost('tavernui-attached', { apiVersion: ui.apiVersion })
           try {
-            const renderer = owner.get?.('tavernAssistantTextRenderer')
-            reportHost('renderer-attached', {
-              got: Boolean(renderer),
-              hasRegister: Boolean(renderer && renderer.register),
-              hasRender: Boolean(renderer && renderer.render),
-            })
-            if (!renderer?.register) {
-              console.warn('[dsh-tavern-comfy] 宿主没有 tavernAssistantTextRenderer，图片无法内联显示')
-              return
-            }
-            let calls = 0
-            const dispose = renderer.register((text, context) => {
-              calls += 1
-              if (calls <= 6) {
-                reportHost('renderer-called', {
-                  n: calls,
-                  textLen: String(text || '').length,
-                  messageId: String(context?.messageId ?? ''),
-                  streaming: Boolean(context?.streaming),
-                  hasRenderText: typeof context?.renderText === 'function',
+            const off = ui.registerMessageAction({
+              id: 'rphub-comfy-draw',
+              label: '🎨 生图',
+              when: context => Boolean(context && context.gameId) && Number(context.turn) > 0,
+              run: async context => {
+                const r = await jsonFetch(BASE + '/attach-turn', {
+                  method: 'POST',
+                  headers: { 'content-type': 'application/json' },
+                  body: JSON.stringify({ gameId: context.gameId, turn: context.turn }),
+                }).catch(error => ({ ok: false, error: String(error && error.message || error) }))
+                reportHost('attach-turn', {
+                  gameId: String(context && context.gameId || '').slice(0, 12), turn: context && context.turn,
+                  ok: Boolean(r && r.ok), attached: r && r.attached, error: String(r && r.error || '').slice(0, 160),
                 })
-              }
-              try { return renderAssistantText(text, context, settings) }
-              catch (error) {
-                reportHost('renderer-threw', { message: String(error?.message ?? error).slice(0, 300) })
-                console.warn('[dsh-tavern-comfy] 内联渲染失败:', error?.message)
-                return null
-              }
+                if (typeof showToast === 'function') {
+                  if (r && r.ok && r.attached) {
+                    showToast('已提交 ' + r.attached + ' 张，出图后自动插进正文')
+                  } else {
+                    showToast('生图没出画面：' + ((r && r.error) || '规划没有产出画面'))
+                  }
+                }
+              },
             })
-            owner.effect?.(() => dispose, 'dsh-tavern-comfy: inline renderer')
-            // 消息级动作：所有卡通用（纯文本卡和 HTML 面板卡都会看到按钮）
-            if (typeof renderer.registerActions === 'function') {
-              const disposeActions = renderer.registerActions((context) => {
+            owner.effect?.(() => off, 'dsh-tavern-comfy: message action')
+
+          // 正文里的 image###英文Tag### 标记：就地画一张图。
+          // 自动配图走的是宿主侧 tavern.attach（Tavern 自己渲染、跟正文版本绑定）；
+          // 这一条是"模型自己在正文里写了标记"时的通道，两条互不干扰。
+          try {
+            const offMarker = ui.registerTextMarker({
+              // 传一份**新的**正则实例：IMAGE_TAG 带 /g，共享同一个对象时 lastIndex
+              // 会被上一次匹配带着走，容易漏掉标记。
+              pattern: new RegExp(IMAGE_TAG.source, IMAGE_TAG.flags),
+              render: ({ groups, gameId, turn, streaming }) => {
                 try {
-                  if (!context || !context.messageId) return null
-                  const bodyText = String(context.text ?? '')
-                  if (bodyText.trim().length < 12) return null
-                  return h(MessageImageButton, {
-                    text: bodyText,
-                    messageId: context.messageId,
-                    turn: context.turn,
-                    sessionId: context.sessionId,
+                  if (streaming) return null            // 生成中不画，免得画出半句话
+                  const prompt = String((groups && groups[0]) || '').trim()
+                  if (!prompt) return null
+                  return h(InlineImage, {
+                    prompt,
+                    imageKey: contentKey(String(gameId || ''), turn, 0, prompt),
+                    auto: true,
                   })
                 } catch (error) {
-                  reportHost('actions-error', { message: String(error?.message ?? error).slice(0, 300) })
+                  reportHost('marker-render-failed', { message: String(error && error.message || error).slice(0, 200) })
                   return null
                 }
-              })
-              owner.effect?.(() => disposeActions, 'dsh-tavern-comfy: message actions')
-              reportHost('actions-registered', { ok: true })
-            } else {
-              reportHost('actions-unavailable', { message: 'Tavern 没提供 registerActions（需要最新补丁）' })
-            }
-            reportHost('renderer-registered', { ok: true })
+              },
+            })
+            owner.effect?.(() => offMarker, 'dsh-tavern-comfy: text marker')
+            reportHost('tavernui-marker-registered', { ok: true })
+
+          // 给自己的媒体类型定显示方式：大图 + 点开放大 + 右键/长按改提示词重画
+          try {
+            const offMedia = ui.registerMediaRenderer('dsh-tavern-comfy/image', args => h(OfficialImage, { item: args && args.item }))
+            owner.effect?.(() => offMedia, 'dsh-tavern-comfy: media renderer')
+            reportHost('tavernui-media-registered', { ok: true })
           } catch (error) {
-            reportHost('renderer-failed', { message: String(error?.message ?? error).slice(0, 300) })
-            console.warn('[dsh-tavern-comfy] 内联渲染器未注册:', error?.message)
+            reportHost('tavernui-media-failed', { message: String(error && error.message || error).slice(0, 200) })
+          }
+          } catch (error) {
+            reportHost('tavernui-marker-failed', { message: String(error && error.message || error).slice(0, 200) })
+          }
+          } catch (error) {
+            reportHost('tavernui-action-failed', { message: String(error && error.message || error).slice(0, 200) })
           }
         })
       } catch (error) {
