@@ -1,0 +1,22 @@
+# 运行时数据 —— 每个人自己的，不进仓库
+config.json
+definitions.json
+jobs-store.json
+plans-store.json
+
+# 用户自己的东西
+backups/
+cache/
+workflows/*.json
+
+# 系统
+Thumbs.db
+desktop.ini
+.DS_Store
+*.log
+node_modules/
+.tmp*/
+
+# 我自己的运维脚本（和插件功能无关）
+reapply-tavern-patch.mjs
+rollback-tavern.mjs

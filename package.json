@@ -1,0 +1,58 @@
+{
+  "name": "dsh-rphub-comfy",
+  "version": "1.0.0",
+  "description": "本地 ComfyUI 场景生图：每轮自动出图、图片内联插在正文段落之间、工作流库与人物库自带控制台。",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "client.js",
+    "cordis.patch.yml",
+    "console.html",
+    "design-rules.md",
+    "worldbook.json",
+    "workflows/.gitkeep",
+    "README.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ]
+    },
+    "compatibility": {
+      "dsh": ">=0.1.0-rc.8 <0.2.0"
+    }
+  },
+  "license": "MIT",
+  "keywords": [
+    "dsh",
+    "dsh-tavern",
+    "comfyui",
+    "stable-diffusion",
+    "text-to-image",
+    "tavern",
+    "plugin"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/weixinlu824-cpu/dsh-rphub-comfy.git"
+  },
+  "homepage": "https://github.com/weixinlu824-cpu/dsh-rphub-comfy#readme",
+  "bugs": {
+    "url": "https://github.com/weixinlu824-cpu/dsh-rphub-comfy/issues"
+  },
+  "author": ""
+}

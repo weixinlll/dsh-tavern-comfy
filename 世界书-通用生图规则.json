@@ -1,0 +1,45 @@
+{
+  "name": "通用生图规则（轻量版）",
+  "entries": [
+    {
+      "comment": "01 核心任务",
+      "content": "# 核心任务\n把正文里的精彩瞬间转译成绘图提示词，并在正文对应位置插入图片。\n\n**每次回复都要配图**，数量和大致位置由插件在系统提示里给出（如果没给，就按剧情节奏自己定 2~4 张）。\n图片要**分散**插在正文段落之间，不要都堆在开头或结尾。",
+      "enabled": true
+    },
+    {
+      "comment": "02 输出格式（必须照抄这个结构）",
+      "content": "# 输出格式\n在正文里插入下面这个结构。<image> 块**写在它所描述的那段正文之后**。\n\n<image>\n<regex>从正文里原样复制的一句话</regex>\n<title_styled>5~15 字的中文标题</title_styled>\n<Tag_think>用两三句话概括这张画的画面：谁、在哪、在做什么、什么光线。只写看得见的东西。</Tag_think>\n<size>竖图</size>\n<prompts>这里写提示词</prompts>\n</image>\n\n**多个图片就写多个 <image> 块**，不需要外层再包 <images>。\n\n## <regex> 的硬性要求（最容易被写错）\n它是\"这张图插在哪\"的定位标记，插件拿它去正文里找位置。\n\n- **必须是正文里真实存在的一句话**，逐字复制，标点空格换行都不能改\n- **10~20 字为宜**，太长容易对不上；不确定就截更短\n- **禁止改写、概括、补字、拼接多段** —— 一字不差才算数\n- 优先选**最能代表这张画视觉内容**的那一句\n\n**对不上位置的后果**：这张图会掉到正文末尾。所以宁可截短、截准。",
+      "enabled": true
+    },
+    {
+      "comment": "03 提示词写法",
+      "content": "# prompts 的写法\n结构：**英文自然语言长句为主干 + 句尾核心 Tag 锚定**。\n\n1. **开头**（如果启用了人物库）：中文姓名 + 角色宏 + 服装宏，见下一条\n2. **主干**：一句主谓宾完整的英文长句，依次覆盖\n   镜头景别 → 场景与光影 → 角色站位与外貌 → 动作与物理交互\n   例：`A medium shot capturing the girl kneeling on the tatami by the window, warm afternoon light spilling across the floor as she reaches toward the paper crane on the desk`\n3. **句尾**：逗号分隔追加 3~8 个核心 Tag\n   例：`kneeling, upper body, kimono, warm light, indoors`\n\n**必须遵守**：\n- 全部英文，用英文逗号分隔，**禁止分号**\n- **只写画面里看得见的东西** —— 不写内心、回忆、比喻、计划、预告\n- 镜头和人物角度要写明（from front / from above / from behind / from side）\n- 画面看不到的部位不要写对应 Tag（背影就别写瞳色）\n- 不要写 quality 词（masterpiece / best quality）—— 插件会在负面词里排除它们",
+      "enabled": true
+    },
+    {
+      "comment": "04 人物库与服装库的调用",
+      "content": "# 调用人物库 / 服装库\n插件会把用户自己维护的**人物库**和**服装库**列在系统提示里。库里有对得上的角色/服装时，用宏调用；否则直接原创英文 Tag 描述。\n\n**宏必须成对闭合**：以 `${\"` 开头、以 `}$` 结尾，**结尾的 $ 千万不要漏**。\n\n## 人物\n`${\"name\":\"角色英文名\", \"angle\":\"视角\", \"upperBody\":\"状态\", \"lowerBody\":\"状态\"}$`\n\n- `angle`：`from front` / `from above` / `from below` / `from side` / `from behind`\n- `upperBody` / `lowerBody`：`sfw`（有衣物，含内衣）/ `nsfw`（裸露）/ `hidden`（不在画面里）\n\n## 服装\n`${\"name\":\"服装名\", \"upperBody\":\"visible\", \"lowerBody\":\"visible\"}$`\n\n- `visible` / `hidden`；全裸时不调用服装宏\n- 可以追加状态词：wet clothes / torn clothes / dirty\n\n## 优先级\n1. 人物库里对得上的角色（把握 ≥ 70%）\n2. 服装库里对得上的服装（把握 ≥ 70%）\n3. **把握不足就直接原创英文 Tag 白描** —— 不要硬套，也不要瞎编名字\n\n**原创角色**（库里没有的）：每一张图都要完整描述一遍外貌，不要因为上一张写过就省略。",
+      "enabled": true
+    },
+    {
+      "comment": "05 画面边界",
+      "content": "# 画面边界\n单张图 = **同一时刻的一个静态瞬间**，像按快门那样。\n\n- 不要写\"从 A 到 B\"的过程（要写这个瞬间在哪）\n- 不要同时描述互相遮挡的部位\n- 构图变了就换一套 Tag：\n  - 全身 → 只拍下半身：**去掉** expression / eye color 这类上半身 Tag\n  - 正面 → 背对：**去掉** eye color，**换成** from behind\n  - 蒙眼 / 遮脸：**去掉** eye color，**加上** blindfold / face covered\n- 抽象概念要拆成画得出来的 Tag：`月下` → `moonlight, night`\n- \"不出现某物\"用 no + Tag：`no bra` / `no panties`\n\n**写不出具体画面的词一律不写。** 每条 Tag 都要对应画面上真实存在的东西。",
+      "enabled": true
+    },
+    {
+      "comment": "06 常用 Tag 参考",
+      "content": "# 常用 Tag 参考（够用就好，不必全用）\n\n**景别**：close-up / upper body / lower body / cowboy shot / full body / from afar / portrait\n**角度**：from front / from above / from below / from side / from behind / dutch angle / pov\n**构图**：centered / off-center / looking at viewer / looking away / looking down / looking up\n**光线**：sunlight / backlighting / warm light / neon light / candlelight / moonlight / rim light\n**时间**：morning / noon / afternoon / dusk / golden hour / night\n**地点**：bedroom / bathroom / kitchen / classroom / office / street / beach / forest / shrine / indoors / outdoors\n**姿势**：standing / sitting / kneeling / lying / on back / on stomach / crouching / leaning / walking\n**手臂**：arms behind back / arms crossed / hands on hips / hand on own chest / raised hand\n**衣物状态**：dress lift / clothes pull / off shoulder / unbuttoned / open shirt / wet clothes / torn clothes / undressing\n**表情**：smile / grin / blush / serious / surprised / closed eyes / open mouth / parted lips\n**头发**：long hair / short hair / ponytail / twin tails / bun / braid / messy hair / wet hair\n**体型**：slim / petite / curvy / tall / muscular / young woman\n**胸部**：flat chest / small breasts / medium breasts / large breasts\n**交互**：holding hands / hugging / hand on another's cheek / carrying / piggyback / kissing",
+      "enabled": true
+    },
+    {
+      "comment": "07 完整示例",
+      "content": "# 完整示例\n\n（假设这是正文）\n> 苏青梧把手里的灯笼放在石阶上，蹲下来仔细看那枚嵌在泥里的铜钱。雨水顺着斗笠边缘滴落，她的指尖刚碰到铜钱，身后的竹林里忽然传来一声轻响。\n\n**配图应该这样写**：\n\n<image>\n<regex>苏青梧把手里的灯笼放在石阶上</regex>\n<title_styled>雨夜拾钱</title_styled>\n<Tag_think>雨夜的破旧石阶前，少女蹲着把灯笼放在地上，伸手去够泥里的铜钱，斗笠边缘在滴水，竹林在背后。</Tag_think>\n<size>竖图</size>\n<prompts>苏青梧, ${\"name\":\"su qingyi\", \"angle\":\"from front\", \"upperBody\":\"sfw\", \"lowerBody\":\"sfw\"}$, ${\"name\":\"湿透的灰色短打\", \"upperBody\":\"visible\", \"lowerBody\":\"visible\"}$, A medium close-up of the girl crouching on wet stone steps, setting down a paper lantern with one hand while reaching toward a coin half-buried in the mud, rain dripping from the edge of her bamboo hat, bamboo grove looming behind her in the dark, upper body, crouching, reaching out, bamboo hat, wet clothes, night, rain, backlighting</prompts>\n</image>\n\n**注意几件事**：\n- `<regex>` 是**原样从正文复制**的一句话（一字不差）\n- 提示词里写了**镜头、地点、光线、动作、衣物状态**\n- 角色宏和服装宏都**成对闭合**\n- 句尾追加了景别（upper body）、姿势（crouching）、状态（wet clothes）、时间（night）、天气（rain）",
+      "enabled": true
+    },
+    {
+      "comment": "08 常见错误",
+      "content": "# 常见错误（检查清单）\n\n写完之后对照检查：\n\n- [ ] 每个 <image> 块里都有 **<regex>**，而且是正文里**逐字存在**的一句话\n- [ ] 每个 <image> 块里都有 **<prompts>**（没有的话这张图会被插件丢弃）\n- [ ] 角色宏、服装宏的**结尾 $ 都在**（`${\"...\"}$` 成对）\n- [ ] 提示词**全是英文 Tag**，没有中文（角色中文名只出现在开头那一次）\n- [ ] 没有写内心活动、回忆、比喻、将来会发生的事\n- [ ] 没有写 quality 词（masterpiece / best quality / absurdres）\n- [ ] 画面里看不到的部位，没有对应的 Tag\n- [ ] 图片**分散**在正文里，不是全堆在结尾\n\n**最常犯的两个错**：\n1. **宏漏了结尾 $** —— 写完立刻回头数一遍\n2. **<regex> 改写了原文** —— 必须 Ctrl+F 能搜到",
+      "enabled": true
+    }
+  ]
+}
