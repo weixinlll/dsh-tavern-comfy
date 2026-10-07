@@ -37,6 +37,13 @@ const absoluteBase = (() => {
 })()
 const BASE = absoluteBase
 
+// 图像查看器的开启函数：由查看器组件挂载时赋值（见下面的 openImageOverlay = ...）。
+// 必须在这里显式声明 —— 它以前是「不带声明的赋值」，靠非严格模式在 window 上造一个
+// 隐式全局变量。一旦 bundle 被包进严格模式，那行赋值会直接 ReferenceError，而周围
+// 十几处 `if (typeof openImageOverlay === 'function')` 守卫会静默放过，
+// 表现成「查看器永远打不开、也没有任何报错」。
+let openImageOverlay = null
+
     // 把浏览器里发生的事发回宿主：前端到底跑没跑、有没有抛错，宿主的 /state 里看得到
     //
     // ⚠ 性能守卫（2026-10-07 加入）：本函数被放在**渲染热路径**上调用
