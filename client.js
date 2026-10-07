@@ -145,7 +145,10 @@ const BASE = absoluteBase
     }
 
     async function jsonFetch(url, init) {
-      const response = await fetch(url, { cache: 'no-store', ...(init ?? {}) })
+      // ⚠ 不要加 cache: 'no-store'！实测在 DSH Desktop（Electron 43）里，
+      //   带这个选项的请求会被网络层直接拒绝（TypeError: Failed to fetch），
+      //   而同一时刻不带它的 fetch（reportHost 用的那种）完全正常。
+      const response = await fetch(url, init ?? {})
       let data = null
       try { data = await response.json() } catch { data = null }
       if (!response.ok || (data && data.ok === false)) {
@@ -349,7 +352,7 @@ const BASE = absoluteBase
       try {
         if (!jobId || typeof openPromptEditor !== 'function') return
         openPromptEditor({ open: true, jobId: String(jobId), prompt: '', negative: '', instruction: '', note: '正在读取提示词…', busy: '' })
-        jsonFetch(BASE + '/job-detail?id=' + encodeURIComponent(String(jobId)), { cache: 'no-store' })
+        jsonFetch(BASE + '/job-detail?id=' + encodeURIComponent(String(jobId)))
           .then(r => {
             if (!r?.ok || !r.job) { openPromptEditor({ note: '读不到提示词：' + (r?.error || '') }); return }
             // 显示"展开前"的原始提示词：能一眼看出调用了哪些角色 / 服装
@@ -1342,7 +1345,10 @@ function versionsOf(jobId) {
         if (tab !== 'gallery') return undefined
         let alive = true
         setHistoryNote('读取中…')
-        jsonFetch(BASE + '/history', { cache: 'no-store' }).then(r => {
+        // ⚠ 写法必须和 /state 完全一致（它一直能成功）：
+        //   不传 init、不加 cache 选项 —— 之前传了 { cache: 'no-store' } 时这个请求会
+        //   被 Electron 的网络层拒绝（TypeError: Failed to fetch），而 /state 没这问题。
+        jsonFetch(BASE + '/history').then(r => {
           if (!alive) return
           setHistoryJobs(r?.jobs ?? [])
           setHistoryNote((r?.jobs ?? []).length ? '' : '还没有生成过图片')
@@ -1405,9 +1411,9 @@ function versionsOf(jobId) {
         try { out.fetchSrc = String(fetch).slice(0, 120) } catch (e) { out.fetchSrc = 'err:' + e.message }
         try { out.origFetch = window.__origFetch ? 'exists' : 'no' } catch {}
         // ② 原生 fetch 相对路径
-        try { const r = await fetch(url, { cache: 'no-store' }); out.fetch = 'HTTP ' + r.status } catch (e) { out.fetch = e.name + ': ' + String(e.message).slice(0, 60) }
+        try { const r = await fetch(url); out.fetch = 'HTTP ' + r.status } catch (e) { out.fetch = e.name + ': ' + String(e.message).slice(0, 60) }
         // ③ 绝对 URL（和 BASE 一样，排除拼接问题）
-        try { const r = await fetch('http://127.0.0.1:43120/plugins/dsh-tavern-comfy/state', { cache: 'no-store' }); out.fetchAbs = 'HTTP ' + r.status } catch (e) { out.fetchAbs = e.name }
+        try { const r = await fetch('http://127.0.0.1:43120/plugins/dsh-tavern-comfy/state'); out.fetchAbs = 'HTTP ' + r.status } catch (e) { out.fetchAbs = e.name }
         // ④ XHR
         out.xhr = await new Promise(res => {
           try {
@@ -1421,7 +1427,7 @@ function versionsOf(jobId) {
           } catch (e) { res('throw: ' + String(e.message).slice(0, 40)) }
         })
         // ⑤ 同一个 origin 但别的路径（排除"只有插件路由被拦"）
-        try { const r = await fetch('http://127.0.0.1:43120/', { cache: 'no-store' }); out.root = 'HTTP ' + r.status } catch (e) { out.root = e.name }
+        try { const r = await fetch('http://127.0.0.1:43120/'); out.root = 'HTTP ' + r.status } catch (e) { out.root = e.name }
         // ⑥ 完全外部（测网络是否整体不可用）
         try { const r = await fetch('https://example.com', { mode: 'no-cors' }); out.external = 'ok' } catch (e) { out.external = e.name }
         return out
@@ -1996,7 +2002,7 @@ function versionsOf(jobId) {
                   setCardPickerFor(open ? -1 : i)
                   if (open) return
                   try {
-                    const r = await jsonFetch(BASE + '/cards', { cache: 'no-store' })
+                    const r = await jsonFetch(BASE + '/cards')
                     setCardList(r?.cards ?? [])
                   } catch { setCardList([]) }
                 },
@@ -2212,7 +2218,7 @@ function versionsOf(jobId) {
             if (!r?.ok) { setWfNote('保存失败：' + (r?.error || '')); return }
             setWfNote('✓ 已保存（' + (r.changed || []).join('、') + '）')
             if (typeof showToast === 'function') showToast('工作流参数已保存')
-            const st2 = await jsonFetch(BASE + '/state', { cache: 'no-store' }).catch(() => null)
+            const st2 = await jsonFetch(BASE + '/state').catch(() => null)
             if (st2) setData(st2)
           } catch (e) { setWfNote('保存失败：' + (e?.message ?? e)) }
         }
@@ -2230,7 +2236,7 @@ function versionsOf(jobId) {
             const t0 = Date.now()
             while (Date.now() - t0 < 180000) {
               await new Promise(res => setTimeout(res, 2500))
-              const s = await jsonFetch(BASE + '/jobs?id=' + encodeURIComponent(r.jobId), { cache: 'no-store' }).catch(() => null)
+              const s = await jsonFetch(BASE + '/jobs?id=' + encodeURIComponent(r.jobId)).catch(() => null)
               const st = s?.job?.status
               if (st === 'done') {
                 setWfTestNote('✓ 这张工作流可用！')
@@ -2268,7 +2274,7 @@ function versionsOf(jobId) {
             if (!r?.ok) { setWfNote('导入失败：' + (r?.error || '')); return }
             setWfNote('✓ 已导入《' + r.name + '》节点 ' + r.nodes + ' 个，识别到：正面 ' + r.bindings.positive + ' / 负面 ' + r.bindings.negative + ' / 尺寸 ' + r.bindings.size + ' / 步数 ' + r.bindings.steps + ' / 底模 ' + r.bindings.model + ' / LoRA ' + r.bindings.loras)
             setWfImportOpen(false); setWfPaste('')
-            const st = await jsonFetch(BASE + '/state', { cache: 'no-store' }).catch(() => null)
+            const st = await jsonFetch(BASE + '/state').catch(() => null)
             if (st) setData(st)
             if (typeof showToast === 'function') showToast('已导入工作流《' + r.name + '》，识别到 ' + r.bindings.loras + ' 个 LoRA')
           } catch (e) { setWfNote('导入失败：' + (e?.message ?? e)) }
@@ -2482,7 +2488,7 @@ function versionsOf(jobId) {
         const onCount = list.filter(e => e.enabled !== false).length
 
         async function refreshWb() {
-          const r = await jsonFetch(BASE + '/state', { cache: 'no-store' }).catch(() => null)
+          const r = await jsonFetch(BASE + '/state').catch(() => null)
           if (r) setData(r)
         }
         async function patchEntry(index, patch, remove, tip) {
@@ -2533,7 +2539,7 @@ function versionsOf(jobId) {
           reader.readAsText(file)
         }
         async function exportWb() {
-          const r = await jsonFetch(BASE + '/worldbook-export', { cache: 'no-store' }).catch(() => null)
+          const r = await jsonFetch(BASE + '/worldbook-export').catch(() => null)
           if (!r?.ok) { setWbNote('导出失败'); return }
           const text = JSON.stringify(r.worldbook, null, 2)
           try {
@@ -2658,7 +2664,7 @@ function versionsOf(jobId) {
                         if (typeof openEditorFor === 'function') openEditorFor(job.id, job.label)
                       } },
                     { icon: '📋', label: '复制提示词', onClick: async function () {
-                        const r = await jsonFetch(BASE + '/job-detail?id=' + encodeURIComponent(job.id), { cache: 'no-store' }).catch(function () { return null })
+                        const r = await jsonFetch(BASE + '/job-detail?id=' + encodeURIComponent(job.id)).catch(function () { return null })
                         const text = String(r?.job?.rawPrompt || r?.job?.prompt || '')
                         if (!text) { if (typeof showToast === 'function') showToast('这张图没记录提示词', 'fail'); return }
                         try { await navigator.clipboard.writeText(text); if (typeof showToast === 'function') showToast('提示词已复制') }
