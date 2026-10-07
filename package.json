@@ -1,5 +1,5 @@
 {
-  "name": "dsh-rphub-comfy",
+  "name": "dsh-tavern-comfy",
   "version": "1.0.0",
   "description": "本地 ComfyUI 场景生图：每轮自动出图、图片内联插在正文段落之间、工作流库与人物库自带控制台。",
   "type": "module",
@@ -48,11 +48,11 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/weixinlu824-cpu/dsh-rphub-comfy.git"
+    "url": "https://github.com/weixinlu824-cpu/dsh-tavern-comfy.git"
   },
-  "homepage": "https://github.com/weixinlu824-cpu/dsh-rphub-comfy#readme",
+  "homepage": "https://github.com/weixinlu824-cpu/dsh-tavern-comfy#readme",
   "bugs": {
-    "url": "https://github.com/weixinlu824-cpu/dsh-rphub-comfy/issues"
+    "url": "https://github.com/weixinlu824-cpu/dsh-tavern-comfy/issues"
   },
   "author": ""
 }

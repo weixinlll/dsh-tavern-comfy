@@ -1,15 +1,15 @@
-/* dsh-rphub-comfy 浏览器半边。
+/* dsh-tavern-comfy 浏览器半边。
  * 只做一件事：把助手正文里的 image###英文Tag### 标记换成真正的图片。
  * 图片是本地 ComfyUI 现画的，所以先占位、再轮询、最后换成 <img>。
  * 配置读取失败时安静退化成纯文本，绝不在宿主启动阶段抛错。 */
 window.__ModuleLoader__.load({
-  id: 'dsh-rphub-comfy',
+  id: 'dsh-tavern-comfy',
   factory: (require) => {
     const module = { exports: {} }
     const exports = module.exports
     let React = null
     try { React = require('react') } catch (error) {
-      try { console.warn('[dsh-rphub-comfy] React 不可用，浏览器界面已禁用:', error?.message) } catch {}
+      try { console.warn('[dsh-tavern-comfy] React 不可用，浏览器界面已禁用:', error?.message) } catch {}
       exports.apply = () => {}
       exports.inject = []
       return module.exports
@@ -26,7 +26,7 @@ const absoluteBase = (() => {
   try { if (location.origin) candidates.push(location.origin) } catch {}
   try { if (document.baseURI) candidates.push(new URL(document.baseURI).origin) } catch {}
   const origin = candidates.find(o => o && o !== 'null' && /^https?:/i.test(o))
-  return (origin || '') + '/plugins/dsh-rphub-comfy'
+  return (origin || '') + '/plugins/dsh-tavern-comfy'
 })()
 const BASE = absoluteBase
 
@@ -2959,7 +2959,7 @@ function versionsOf(jobId) {
           reportHost('seat-registered', { seat: 'assistant-actions', injectReturned: ok !== undefined })
         } catch (error) {
           reportHost('seat-failed', { seat: 'assistant-actions', error: String(error?.message ?? error) })
-          console.warn('[dsh-rphub-comfy] 生图按钮未注册:', error?.message)
+          console.warn('[dsh-tavern-comfy] 生图按钮未注册:', error?.message)
         }
 
         // 设置 → 本地生图（与「错题库」「卡片更新器」同一层）
@@ -2972,7 +2972,7 @@ function versionsOf(jobId) {
             label: () => '本地生图',
           }, SettingsPanel))
         } catch (error) {
-          console.warn('[dsh-rphub-comfy] 设置页面未注册:', error?.message)
+          console.warn('[dsh-tavern-comfy] 设置页面未注册:', error?.message)
         }
 
         ctx.inject?.(['tavernAssistantTextRenderer'], owner => {
@@ -2984,7 +2984,7 @@ function versionsOf(jobId) {
               hasRender: Boolean(renderer && renderer.render),
             })
             if (!renderer?.register) {
-              console.warn('[dsh-rphub-comfy] 宿主没有 tavernAssistantTextRenderer，图片无法内联显示')
+              console.warn('[dsh-tavern-comfy] 宿主没有 tavernAssistantTextRenderer，图片无法内联显示')
               return
             }
             let calls = 0
@@ -3002,11 +3002,11 @@ function versionsOf(jobId) {
               try { return renderAssistantText(text, context, settings) }
               catch (error) {
                 reportHost('renderer-threw', { message: String(error?.message ?? error).slice(0, 300) })
-                console.warn('[dsh-rphub-comfy] 内联渲染失败:', error?.message)
+                console.warn('[dsh-tavern-comfy] 内联渲染失败:', error?.message)
                 return null
               }
             })
-            owner.effect?.(() => dispose, 'dsh-rphub-comfy: inline renderer')
+            owner.effect?.(() => dispose, 'dsh-tavern-comfy: inline renderer')
             // 消息级动作：所有卡通用（纯文本卡和 HTML 面板卡都会看到按钮）
             if (typeof renderer.registerActions === 'function') {
               const disposeActions = renderer.registerActions((context) => {
@@ -3025,7 +3025,7 @@ function versionsOf(jobId) {
                   return null
                 }
               })
-              owner.effect?.(() => disposeActions, 'dsh-rphub-comfy: message actions')
+              owner.effect?.(() => disposeActions, 'dsh-tavern-comfy: message actions')
               reportHost('actions-registered', { ok: true })
             } else {
               reportHost('actions-unavailable', { message: 'Tavern 没提供 registerActions（需要最新补丁）' })
@@ -3033,15 +3033,15 @@ function versionsOf(jobId) {
             reportHost('renderer-registered', { ok: true })
           } catch (error) {
             reportHost('renderer-failed', { message: String(error?.message ?? error).slice(0, 300) })
-            console.warn('[dsh-rphub-comfy] 内联渲染器未注册:', error?.message)
+            console.warn('[dsh-tavern-comfy] 内联渲染器未注册:', error?.message)
           }
         })
       } catch (error) {
-        console.warn('[dsh-rphub-comfy] 浏览器半边启动失败:', error?.message)
+        console.warn('[dsh-tavern-comfy] 浏览器半边启动失败:', error?.message)
       }
     }
 
-    exports.name = 'dsh-rphub-comfy'
+    exports.name = 'dsh-tavern-comfy'
     exports.inject = ['slots']
     exports.apply = apply
     return module.exports

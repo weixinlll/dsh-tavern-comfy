@@ -1,4 +1,4 @@
-# dsh-rphub-comfy
+# dsh-tavern-comfy
 
 **DSH Tavern 的本地 ComfyUI 场景生图插件**
 
@@ -32,7 +32,7 @@
 
 ```bash
 cd ~/.dsh/profile-data/tavern/data/tools
-git clone https://github.com/weixinlu824-cpu/dsh-rphub-comfy.git rphub-comfy
+git clone https://github.com/weixinlu824-cpu/dsh-tavern-comfy.git rphub-comfy
 ```
 
 **然后完整重启 DSH Desktop**（关掉整个程序再打开，不是刷新页面）。
