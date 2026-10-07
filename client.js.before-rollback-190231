@@ -88,9 +88,10 @@ const BASE = absoluteBase
         })
       })
       window.addEventListener('unhandledrejection', event => {
-        reportHost('unhandled-rejection', { reason: String(event?.reason?.message ?? event?.reason ?? '').slice(0, 500) })
+        reportHost('unhandled-rejection', { reason: String(event?.reason?.message ?? event?.reason ?? '').slice(0, 500), stack: String(event?.reason?.stack ?? '').slice(0, 1500) })
       })
     } catch { /* 老环境没有这些事件就算了 */ }
+
     // 当前会话 id：设置页里点「让 agent 设计角色」时要拿它去读卡片设定
     let lastSessionId = ''
     // 每条助手消息的正文（消息下方那个「生图」按钮要用它）
@@ -144,7 +145,10 @@ const BASE = absoluteBase
     }
 
     async function jsonFetch(url, init) {
-      const response = await fetch(url, { cache: 'no-store', ...(init ?? {}) })
+      // ⚠ 不要加 cache: 'no-store'！实测在 DSH Desktop（Electron 43）里，
+      //   带这个选项的请求会被网络层直接拒绝（TypeError: Failed to fetch），
+      //   而同一时刻不带它的 fetch（reportHost 用的那种）完全正常。
+      const response = await fetch(url, init ?? {})
       let data = null
       try { data = await response.json() } catch { data = null }
       if (!response.ok || (data && data.ok === false)) {
@@ -348,7 +352,7 @@ const BASE = absoluteBase
       try {
         if (!jobId || typeof openPromptEditor !== 'function') return
         openPromptEditor({ open: true, jobId: String(jobId), prompt: '', negative: '', instruction: '', note: '正在读取提示词…', busy: '' })
-        jsonFetch(BASE + '/job-detail?id=' + encodeURIComponent(String(jobId)), { cache: 'no-store' })
+        jsonFetch(BASE + '/job-detail?id=' + encodeURIComponent(String(jobId)))
           .then(r => {
             if (!r?.ok || !r.job) { openPromptEditor({ note: '读不到提示词：' + (r?.error || '') }); return }
             // 显示"展开前"的原始提示词：能一眼看出调用了哪些角色 / 服装
@@ -1305,7 +1309,25 @@ function versionsOf(jobId) {
       function refresh() {
         if (refreshInFlight.current) return Promise.resolve()
         refreshInFlight.current = true
-        jsonFetch(BASE + '/state').then(setData).catch(e => setNote('读不到状态：' + (e && e.message ? e.message : e)))
+        jsonFetch(BASE + '/state').then(setData).catch(e => {
+        let topOrigin = ''
+        try { topOrigin = window.top?.location?.origin ?? '' } catch {}
+        const d = { base: BASE, url: BASE + '/state', origin: location.origin, topOrigin, errName: String(e?.name ?? ''), errMsg: String(e?.message ?? e).slice(0, 200) }
+        try { console.error('[dsh-tavern-comfy] /state 失败', d) } catch {}
+        try {
+          fetch(BASE + '/report', {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ stage: 'state-fail', data: d }),
+          }).catch(() => {})
+        } catch {}
+        setNote([
+          '读不到状态：' + (e && e.message ? e.message : e),
+          'BASE=' + d.base,
+          'origin=' + d.origin,
+          'topOrigin=' + d.topOrigin,
+          'errName=' + d.errName,
+        ].join('　|　'))
+      })
         refreshInFlight.current = false
       }
       React.useEffect(() => { refresh() }, [])
@@ -1323,13 +1345,93 @@ function versionsOf(jobId) {
         if (tab !== 'gallery') return undefined
         let alive = true
         setHistoryNote('读取中…')
-        jsonFetch(BASE + '/history', { cache: 'no-store' }).then(r => {
+        // ⚠ 写法必须和 /state 完全一致（它一直能成功）：
+        //   不传 init、不加 cache 选项 —— 之前传了 { cache: 'no-store' } 时这个请求会
+        //   被 Electron 的网络层拒绝（TypeError: Failed to fetch），而 /state 没这问题。
+        jsonFetch(BASE + '/history').then(r => {
           if (!alive) return
           setHistoryJobs(r?.jobs ?? [])
           setHistoryNote((r?.jobs ?? []).length ? '' : '还没有生成过图片')
-        }).catch(error => { if (alive) setHistoryNote('读不到：' + (error?.message ?? error)) })
+        }).catch(error => {
+          if (!alive) return
+          // 把浏览器侧的真实情况发回宿主，方便定位（BASE / location / 错误名）
+          let topOrigin = '', topHref = ''
+          try { topOrigin = window.top?.location?.origin ?? '' } catch {}
+          try { topHref = window.top?.location?.href ?? '' } catch {}
+          const detail = {
+            base: BASE,
+            url: BASE + '/history',
+            origin: (typeof location !== 'undefined' ? location.origin : ''),
+            href: (typeof location !== 'undefined' ? location.href.slice(0, 200) : ''),
+            topOrigin, topHref: topHref.slice(0, 200),
+            errName: String(error?.name ?? ''),
+            errMsg: String(error?.message ?? error).slice(0, 200),
+            inIframe: (() => { try { return window.top !== window.self } catch { return 'blocked' } })(),
+          }
+          try { console.error('[dsh-tavern-comfy] /history 失败', detail) } catch {}
+          // 用原生 fetch 直接发（不依赖 post 函数，提高成功率）
+          try {
+            fetch(BASE + '/report', {
+              method: 'POST', headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ stage: 'history-fail', data: detail }),
+            }).catch(() => {})
+          } catch {}
+          const lines = [
+            '读不到：' + detail.errMsg,
+            'BASE=' + detail.base,
+            'origin=' + detail.origin,
+            'topOrigin=' + detail.topOrigin,
+            'inIframe=' + String(detail.inIframe),
+            'errName=' + detail.errName,
+            'href=' + detail.href,
+          ]
+          if (alive) setHistoryNote(lines.join('　|　'))
+          // 自动跑多路探测，结果追加到面板
+          probeNetwork().then(p => {
+            if (!alive) return
+            const txt = Object.entries(p).map(([k, v]) => k + '=' + v).join('　|　')
+            setHistoryNote(lines.join('　|　') + '\n\n【网络探测】' + txt)
+            try { console.error('[dsh-tavern-comfy] 网络探测', p) } catch {}
+            try {
+              fetch(BASE + '/report', {
+                method: 'POST', headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ stage: 'net-probe', data: p }),
+              }).catch(() => {})
+            } catch {}
+          }).catch(() => {})
+        })
         return () => { alive = false }
       }, [tab])
+
+      /** 多路探测：找出 fetch 为什么失败（换 XHR / 绝对 URL / 看 fetch 有没有被改）。 */
+      async function probeNetwork() {
+        const out = {}
+        const url = BASE + '/state'
+        // ① fetch 长什么样（是不是被 DSH 包过）
+        try { out.fetchSrc = String(fetch).slice(0, 120) } catch (e) { out.fetchSrc = 'err:' + e.message }
+        try { out.origFetch = window.__origFetch ? 'exists' : 'no' } catch {}
+        // ② 原生 fetch 相对路径
+        try { const r = await fetch(url); out.fetch = 'HTTP ' + r.status } catch (e) { out.fetch = e.name + ': ' + String(e.message).slice(0, 60) }
+        // ③ 绝对 URL（和 BASE 一样，排除拼接问题）
+        try { const r = await fetch('http://127.0.0.1:43120/plugins/dsh-tavern-comfy/state'); out.fetchAbs = 'HTTP ' + r.status } catch (e) { out.fetchAbs = e.name }
+        // ④ XHR
+        out.xhr = await new Promise(res => {
+          try {
+            const x = new XMLHttpRequest()
+            x.open('GET', url, true)
+            x.onload = () => res('HTTP ' + x.status)
+            x.onerror = () => res('onerror')
+            x.ontimeout = () => res('timeout')
+            x.timeout = 8000
+            x.send()
+          } catch (e) { res('throw: ' + String(e.message).slice(0, 40)) }
+        })
+        // ⑤ 同一个 origin 但别的路径（排除"只有插件路由被拦"）
+        try { const r = await fetch('http://127.0.0.1:43120/'); out.root = 'HTTP ' + r.status } catch (e) { out.root = e.name }
+        // ⑥ 完全外部（测网络是否整体不可用）
+        try { const r = await fetch('https://example.com', { mode: 'no-cors' }); out.external = 'ok' } catch (e) { out.external = e.name }
+        return out
+      }
 
       function post(pathname, body) {
         return jsonFetch(BASE + pathname, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
@@ -1343,10 +1445,14 @@ function versionsOf(jobId) {
         } catch (e) { setNote('保存失败：' + (e && e.message ? e.message : e)) }
       }
 
-      if (!data) return h('div', { style: { padding: '18px', fontSize: '13px' } }, note || '正在读取…')
-      const config = data.config || {}
-      const workflows = data.workflows || []
+      // 必须放在早退之前：下面 loadComfyStatus()/ModelPicker 等是 hoisted 声明，
+      // 会被挂载 effect 调用；首次渲染 data 还是 null 时会在早退处跳过这些 const 的
+      // 初始化，于是报 ReferenceError: Cannot access 'config' before initialization。
+      const config = (data && data.config) || {}
+      const workflows = (data && data.workflows) || []
       const effective = config.plannerEffective || {}
+
+      if (!data) return h('div', { style: { padding: '18px', fontSize: '13px' } }, note || '正在读取…')
 
       // ---- 顶部状态 ----
       // ---- 顶部状态 ----
@@ -1896,7 +2002,7 @@ function versionsOf(jobId) {
                   setCardPickerFor(open ? -1 : i)
                   if (open) return
                   try {
-                    const r = await jsonFetch(BASE + '/cards', { cache: 'no-store' })
+                    const r = await jsonFetch(BASE + '/cards')
                     setCardList(r?.cards ?? [])
                   } catch { setCardList([]) }
                 },
@@ -2112,7 +2218,7 @@ function versionsOf(jobId) {
             if (!r?.ok) { setWfNote('保存失败：' + (r?.error || '')); return }
             setWfNote('✓ 已保存（' + (r.changed || []).join('、') + '）')
             if (typeof showToast === 'function') showToast('工作流参数已保存')
-            const st2 = await jsonFetch(BASE + '/state', { cache: 'no-store' }).catch(() => null)
+            const st2 = await jsonFetch(BASE + '/state').catch(() => null)
             if (st2) setData(st2)
           } catch (e) { setWfNote('保存失败：' + (e?.message ?? e)) }
         }
@@ -2130,7 +2236,7 @@ function versionsOf(jobId) {
             const t0 = Date.now()
             while (Date.now() - t0 < 180000) {
               await new Promise(res => setTimeout(res, 2500))
-              const s = await jsonFetch(BASE + '/jobs?id=' + encodeURIComponent(r.jobId), { cache: 'no-store' }).catch(() => null)
+              const s = await jsonFetch(BASE + '/jobs?id=' + encodeURIComponent(r.jobId)).catch(() => null)
               const st = s?.job?.status
               if (st === 'done') {
                 setWfTestNote('✓ 这张工作流可用！')
@@ -2168,7 +2274,7 @@ function versionsOf(jobId) {
             if (!r?.ok) { setWfNote('导入失败：' + (r?.error || '')); return }
             setWfNote('✓ 已导入《' + r.name + '》节点 ' + r.nodes + ' 个，识别到：正面 ' + r.bindings.positive + ' / 负面 ' + r.bindings.negative + ' / 尺寸 ' + r.bindings.size + ' / 步数 ' + r.bindings.steps + ' / 底模 ' + r.bindings.model + ' / LoRA ' + r.bindings.loras)
             setWfImportOpen(false); setWfPaste('')
-            const st = await jsonFetch(BASE + '/state', { cache: 'no-store' }).catch(() => null)
+            const st = await jsonFetch(BASE + '/state').catch(() => null)
             if (st) setData(st)
             if (typeof showToast === 'function') showToast('已导入工作流《' + r.name + '》，识别到 ' + r.bindings.loras + ' 个 LoRA')
           } catch (e) { setWfNote('导入失败：' + (e?.message ?? e)) }
@@ -2382,7 +2488,7 @@ function versionsOf(jobId) {
         const onCount = list.filter(e => e.enabled !== false).length
 
         async function refreshWb() {
-          const r = await jsonFetch(BASE + '/state', { cache: 'no-store' }).catch(() => null)
+          const r = await jsonFetch(BASE + '/state').catch(() => null)
           if (r) setData(r)
         }
         async function patchEntry(index, patch, remove, tip) {
@@ -2433,7 +2539,7 @@ function versionsOf(jobId) {
           reader.readAsText(file)
         }
         async function exportWb() {
-          const r = await jsonFetch(BASE + '/worldbook-export', { cache: 'no-store' }).catch(() => null)
+          const r = await jsonFetch(BASE + '/worldbook-export').catch(() => null)
           if (!r?.ok) { setWbNote('导出失败'); return }
           const text = JSON.stringify(r.worldbook, null, 2)
           try {
@@ -2558,7 +2664,7 @@ function versionsOf(jobId) {
                         if (typeof openEditorFor === 'function') openEditorFor(job.id, job.label)
                       } },
                     { icon: '📋', label: '复制提示词', onClick: async function () {
-                        const r = await jsonFetch(BASE + '/job-detail?id=' + encodeURIComponent(job.id), { cache: 'no-store' }).catch(function () { return null })
+                        const r = await jsonFetch(BASE + '/job-detail?id=' + encodeURIComponent(job.id)).catch(function () { return null })
                         const text = String(r?.job?.rawPrompt || r?.job?.prompt || '')
                         if (!text) { if (typeof showToast === 'function') showToast('这张图没记录提示词', 'fail'); return }
                         try { await navigator.clipboard.writeText(text); if (typeof showToast === 'function') showToast('提示词已复制') }
@@ -2861,6 +2967,67 @@ function versionsOf(jobId) {
         h('div', { style: { fontSize: '11px', color: '#6b7480', marginTop: '14px' } }, '配置存在插件的 config.json / definitions.json；这个页面的修改立即生效。'),
       )
     }
+    // ═══════════════════════════════════════════════════════════════════
+    // 控制台浮层（2026-10-07）
+    //
+    // 背景：DSH Desktop 的「设置」渲染上下文禁止访问 127.0.0.1（fetch/XHR 全失败），
+    //   导致设置面板里的所有数据都读不到。而主窗口（聊天区）fetch 完全正常。
+    // 方案：把整个 SettingsPanel 渲染到 shell.overlay —— 那是主窗口浮层，网络可用。
+    //   侧栏底部的按钮负责打开它。
+    // ═══════════════════════════════════════════════════════════════════
+    function ConsoleOverlay() {
+      const [open, setOpen] = React.useState(false)
+      React.useEffect(() => {
+        const onOpen = () => setOpen(true)
+        const onKey = event => { if (event.key === 'Escape') setOpen(false) }
+        window.addEventListener('dsh-tavern-comfy:open-console', onOpen)
+        window.addEventListener('keydown', onKey)
+        reportHost('console-overlay-mounted', { href: String(location?.href ?? '').slice(0, 80) })
+        return () => {
+          window.removeEventListener('dsh-tavern-comfy:open-console', onOpen)
+          window.removeEventListener('keydown', onKey)
+        }
+      }, [])
+      if (!open) return h('div', { style: { display: 'none' }, 'aria-hidden': 'true' })
+      return h('div', {
+        style: {
+          position: 'fixed', inset: 0, zIndex: 2147483100,
+          background: 'rgba(6,9,14,.86)', backdropFilter: 'blur(6px)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '18px',
+        },
+        onClick: event => { if (event.target === event.currentTarget) setOpen(false) },
+      },
+        h('div', {
+          style: {
+            width: 'min(1180px, 96vw)', height: 'min(86vh, 900px)', overflow: 'auto',
+            background: '#0f131a', border: '1px solid rgba(255,255,255,.12)',
+            borderRadius: '14px', padding: '16px', position: 'relative',
+          },
+        },
+          h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' } },
+            h('div', { style: { fontSize: '15px', fontWeight: 600 } }, '🎨 本地生图控制台'),
+            h('button', {
+              style: { background: 'transparent', color: '#dfe4ec', border: '1px solid rgba(255,255,255,.2)', borderRadius: '8px', padding: '4px 12px', cursor: 'pointer' },
+              onClick: () => setOpen(false),
+            }, '关闭 ✕'),
+          ),
+          h(SettingsPanel, { embedded: true }),
+        ),
+      )
+    }
+
+    /** 侧栏底部的小按钮：打开控制台浮层。 */
+    function ConsoleLauncher() {
+      return h('button', {
+        style: {
+          display: 'flex', alignItems: 'center', gap: '8px', width: '100%',
+          background: 'transparent', border: 'none', color: 'inherit',
+          padding: '8px 10px', borderRadius: '8px', cursor: 'pointer', fontSize: '13px', textAlign: 'left',
+        },
+        onClick: () => { try { window.dispatchEvent(new CustomEvent('dsh-tavern-comfy:open-console')) } catch {} },
+      }, '🎨 本地生图')
+    }
+
     function apply(ctx) {
       // 诊断：证明 apply 被调到，并看清 ctx 上到底有什么
       try {
@@ -2886,6 +3053,26 @@ function versionsOf(jobId) {
             settings.plannerEnabled = state.config.plannerEnabled !== false
           }
         }).catch(() => { /* 拿不到配置就安静退化成只在有标记时出图 */ })
+
+        // ★ 控制台浮层：整个设置界面搬到主窗口（那里 fetch 可用）
+        try {
+          ctx.slots?.inject?.('shell.overlay', () => ctx.slots.register({
+            name: 'shell.overlay',
+            id: 'dsh-tavern-comfy-console',
+            order: 95,
+          }, ConsoleOverlay))
+          reportHost('seat-registered', { seat: 'shell.overlay.console' })
+        } catch (error) { reportHost('seat-failed', { seat: 'shell.overlay.console', error: String(error?.message ?? error).slice(0, 120) }) }
+
+        // ★ 侧栏入口按钮
+        try {
+          ctx.slots?.inject?.('sidebar.footer.action', () => ctx.slots.register({
+            name: 'sidebar.footer.action',
+            id: 'dsh-tavern-comfy-launcher',
+            order: 50,
+          }, ConsoleLauncher))
+          reportHost('seat-registered', { seat: 'sidebar.footer.action' })
+        } catch (error) { reportHost('seat-failed', { seat: 'sidebar.footer.action', error: String(error?.message ?? error).slice(0, 120) }) }
 
         // 全屏看图浮层
         try {
