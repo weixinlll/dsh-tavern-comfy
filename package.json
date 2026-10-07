@@ -1,6 +1,6 @@
 {
   "name": "dsh-tavern-comfy",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "本地 ComfyUI 场景生图：每轮自动出图、图片内联插在正文段落之间、工作流库与人物库自带控制台。",
   "type": "module",
   "main": "lib/index.js",
@@ -15,7 +15,7 @@
     "cordis.patch.yml",
     "console.html",
     "design-rules.md",
-    "worldbook.json",
+    "世界书-通用生图规则.json",
     "workflows/.gitkeep",
     "README.md",
     "LICENSE"

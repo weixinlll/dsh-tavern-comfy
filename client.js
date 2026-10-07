@@ -1,6 +1,13 @@
 /* dsh-tavern-comfy 浏览器半边。
- * 只做一件事：把助手正文里的 image###英文Tag### 标记换成真正的图片。
- * 图片是本地 ComfyUI 现画的，所以先占位、再轮询、最后换成 <img>。
+ *
+ * 正文里的图**不再由插件接管渲染**。Tavern 开放官方插件接口后，宿主侧的
+ * tavern.attach 已经能把图片和正文版本绑在一起（回退自动隐藏、切回来又出现），
+ * 浏览器这边只负责注册与画界面：
+ *   1. tavernUi.registerMediaRenderer  画自定义媒体类型（大图 / 右键改提示词 / 查看器）
+ *   2. tavernUi.registerMessageAction  消息下方那颗「🎨 生图」按钮
+ *   3. tavernUi.registerTextMarker     正文里模型自己写的 image###...### 标记
+ *   4. 设置面板 / 控制台 / 历史图库 / 人物库 / 世界书 —— 插件自己的界面
+ *
  * 配置读取失败时安静退化成纯文本，绝不在宿主启动阶段抛错。 */
 window.__ModuleLoader__.load({
   id: 'dsh-tavern-comfy',
