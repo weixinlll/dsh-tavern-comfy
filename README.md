@@ -213,7 +213,7 @@ API 根地址   [http://127.0.0.1:8188        ]
 生成时用宏调用：
 
 ```
-${"name":"su qingyi", "angle":"from front", "upperBody":"sfw", "lowerBody":"sfw"}$
+${"name":"xiao yu", "angle":"from front", "upperBody":"sfw", "lowerBody":"sfw"}$
 ${"name":"湿透的灰色短打", "upperBody":"visible", "lowerBody":"visible"}$
 ```
 

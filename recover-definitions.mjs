@@ -6,9 +6,14 @@ import { fileURLToPath } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const DEFS = join(HERE, 'definitions.json')
+// 只认插件目录自己那份 backups/。以前这里还写死过一个绝对路径（开发机上的备份目录），
+// 对别人毫无意义，已去掉 —— 想额外扫别的目录，用环境变量 DEFINITIONS_BACKUP_DIRS 指定。
 const BACKUP_DIRS = [
   join(HERE, 'backups'),
-  'C:/Users/30625/.dsh/profile-data/tavern/data/plugins-backup/safe-definitions',
+  ...String(process.env.DEFINITIONS_BACKUP_DIRS ?? '')
+    .split(/[;,]/)
+    .map(s => s.trim())
+    .filter(Boolean),
 ]
 
 // 找一个角色最多的备份

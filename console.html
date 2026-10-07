@@ -144,7 +144,7 @@
         <li>在游戏里改插件的「模型」下拉：选 <b>V4.5 完整版</b> 或 <b>V5 完整版</b>，各对应下面的哪一份由「插件里选这个时」那一栏决定。</li>
         <li>把新工作流 JSON 丢进 <code>workflows</code> 文件夹，再点右上角「查找新工作流」。</li>
       </ol>
-      <p><b>插件里还没接线的话，先做这两步：</b>Tavern → 设置 → 插件 → <b>RPHub 生图</b> → <code>STA1N 服务地址</code> 填 <code id="bridgeUrlInline">http://127.0.0.1:8788</code>，<code>STA1N API Key</code> 随便填个 <code>local</code>，保存。</p>
+      <p><b>不用动 Tavern 的设置。</b>工作流是插件自己的东西：换画风就在这一页点，或把新的工作流 JSON 丢进 <code>workflows</code> 文件夹。</p>
     </div>
     <div id="workflowCards"></div>
   </section>
@@ -558,7 +558,7 @@ function renderLibrary() {
     const nameInput = document.createElement('input')
     nameInput.type = 'text'
     nameInput.value = def.name || ''
-    nameInput.placeholder = '名字，例如 韩月梅'
+    nameInput.placeholder = '名字，例如 小雨'
     nameInput.addEventListener('input', () => { def.name = nameInput.value })
     const remove = text('button', 'danger sm', '删除')
     remove.addEventListener('click', () => {
@@ -666,7 +666,6 @@ function renderSettings() {
   $('#cfgInjectWeight').value = state.config.injectWeight ?? 1.1
   $('#cfgOverrideSteps').checked = Boolean(state.config.overrideSteps)
   $('#lockWorkflow').checked = Boolean(state.config.lockWorkflow)
-  $('#bridgeUrlInline').textContent = location.origin
   const rows = $('#sizeRows')
   rows.innerHTML = ''
   for (const size of Object.keys(SIZE_NAMES)) {

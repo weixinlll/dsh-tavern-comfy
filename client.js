@@ -1137,11 +1137,10 @@ function versionsOf(jobId) {
     function renderAssistantText(text, context, options) {
       try {
         if (context?.sessionId) lastSessionId = String(context.sessionId)
-        // 游玩正文一律接管（由 PlannedBody 决定是插图还是原样渲染）。
-        // ⚠️ 不能因为「生图规划」没开就不接管：手动点按钮生成的图正是靠这条链路
-        //    按挂载句插进正文的，不接管就永远只在消息下面显示。
-        //    接管之所以安全，是因为 PlannedBody 在没有图/标记时会自己把正文渲染出来
-        //    （见上面的 rphub-plain 分支），不会返回 null 吞掉正文。
+        // ⚠️ 这是 v1.0「打补丁时代」的遗留函数，**当前没有任何地方注册它**，留着只为备查。
+        //    正文渲染已经交回 Tavern 原生：图由宿主侧 tavern.attach 按 anchor 挂上，
+        //    Tavern 自己渲染、自己跟 textVersion 绑定。
+        //    不要再注册它 —— 一旦注册，会和 attach 挂的图重复渲染。
         if (context?.streaming) return null
         const renderText = typeof context?.renderText === 'function' ? context.renderText : null
         if (!renderText) return null
@@ -3278,13 +3277,15 @@ function versionsOf(jobId) {
       try {
         let keys = null
         try { keys = Object.keys(ctx ?? {}).slice(0, 40) } catch { keys = null }
-        let renderer = false
-        try { renderer = Boolean(ctx && typeof ctx.get === 'function' && ctx.get('tavernAssistantTextRenderer')) } catch { renderer = 'threw' }
+        // 只探测公开服务。不再去问 Tavern 的补丁服务在不在 —— 补丁方案已废弃，
+        // 那个字段既没有意义，也把插件和 Tavern 的内部实现绑在一起。
+        let hasTavernUi = null
+        try { hasTavernUi = Boolean(ctx && typeof ctx.get === 'function' && ctx.get('tavernUi')) } catch { hasTavernUi = 'threw' }
         reportHost('apply-start', {
           hasSlots: Boolean(ctx && ctx.slots),
           hasGet: Boolean(ctx && typeof ctx.get === 'function'),
           hasEffect: Boolean(ctx && typeof ctx.effect === 'function'),
-          hasRenderer: renderer,
+          hasTavernUi,
           ctxKeys: keys,
         })
       } catch (error) { reportHost('apply-report-failed', { message: String(error && error.message) }) }
