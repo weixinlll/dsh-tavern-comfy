@@ -47,6 +47,13 @@ const BASE = absoluteBase
     let reportSent = 0
     // 这些 stage 出现在渲染热路径上，指纹超预算时必须丢弃，不能积压
     const HOT_REPORT_STAGES = new Set(['renderer-takeover', 'renderer-called', 'plannedbody-mounted'])
+    // 这些是低频且关键的取证上报：不受总量与并发限制，必须发出去。
+    // 2026-10-07：history-fail 曾经一条都收不到 —— 因为聊天渲染的 renderer-called
+    // 把 6 个并发槽占满，非热路径的失败上报被静默丢弃，导致无法定位真因。
+    const CRITICAL_REPORT_STAGES = new Set([
+      'history-fail', 'history-ok', 'fetch-retry', 'state-fail',
+      'window-error', 'unhandled-rejection',
+    ])
 
     function reportFingerprint(stage, data) {
       try { return stage + '|' + JSON.stringify(data ?? null) } catch { return stage + '|' }
@@ -57,13 +64,15 @@ const BASE = absoluteBase
         const key = reportFingerprint(stage, data)
         // 同一指纹只报一次（去重：这是原来请求量爆炸的主因）
         if (seenReports.has(key)) return
-        if (reportSent >= REPORT_TOTAL_BUDGET) {
-          if (HOT_REPORT_STAGES.has(stage)) return   // 热路径：直接丢弃
-          if (seenReports.size > 2000) seenReports.clear()
-        }
-        if (reportInFlight >= REPORT_CONCURRENCY) {
-          if (HOT_REPORT_STAGES.has(stage)) return   // 热路径：宁可丢也不排队
-          return
+        if (!CRITICAL_REPORT_STAGES.has(stage)) {
+          if (reportSent >= REPORT_TOTAL_BUDGET) {
+            if (HOT_REPORT_STAGES.has(stage)) return   // 热路径：直接丢弃
+            if (seenReports.size > 2000) seenReports.clear()
+          }
+          if (reportInFlight >= REPORT_CONCURRENCY) {
+            if (HOT_REPORT_STAGES.has(stage)) return   // 热路径：宁可丢也不排队
+            return
+          }
         }
         seenReports.add(key)
         reportSent += 1
@@ -78,6 +87,7 @@ const BASE = absoluteBase
     // 客户端版本戳：重启 DSH 后可以在 /state 的 clientReports 里确认加载的是哪一版
     const CLIENT_BUILD = 'client-2026-10-07-1320'
     reportHost('bundle-evaluated', { at: Date.now(), href: String(location?.href ?? '').slice(0, 120), build: CLIENT_BUILD, features: 'wb-tab,batch-del,big-nav,artist-sets,ctx-menu' })
+
     try {
       window.addEventListener('error', event => {
         reportHost('window-error', {
@@ -143,14 +153,39 @@ const BASE = absoluteBase
       return 'k' + (a >>> 0).toString(36)
     }
 
+    // 单次请求，不做任何兜底
+    function jsonFetchOnce(url, init) {
+      return fetch(url, init).then(async response => {
+        let data = null
+        try { data = await response.json() } catch { data = null }
+        if (!response.ok || (data && data.ok === false)) {
+          throw new Error((data && data.error) || `HTTP ${response.status}`)
+        }
+        return data
+      })
+    }
+
+    /**
+     * 带自愈的请求：默认带 cache:'no-store'（避免中间层缓存住状态），
+     * 若在网络层直接失败（TypeError: Failed to fetch），退回不带任何 cache 选项重发一次。
+     * 2026-10-07 加入：/state 正常而 /history 报 Failed to fetch，用重试兜底并上报取证。
+     */
     async function jsonFetch(url, init) {
-      const response = await fetch(url, { cache: 'no-store', ...(init ?? {}) })
-      let data = null
-      try { data = await response.json() } catch { data = null }
-      if (!response.ok || (data && data.ok === false)) {
-        throw new Error((data && data.error) || `HTTP ${response.status}`)
+      // 三次尝试：原样 → 去掉 cache 选项 → 再去掉 cache 选项（间隔退避）。
+      // 网络层 TypeError（Failed to fetch）通常重试就能过去；HTTP 状态错误（Error）直接抛，不浪费时间。
+      const attempts = [{ cache: 'no-store', ...(init ?? {}) }, init ?? undefined, init ?? undefined]
+      let lastError
+      for (let i = 0; i < attempts.length; i += 1) {
+        try {
+          return await jsonFetchOnce(url, attempts[i])
+        } catch (error) {
+          lastError = error
+          if (!(error instanceof TypeError)) throw error
+          if (i === 0) reportHost('fetch-retry', { tail: String(url).slice(-40), msg: String(error.message || '') })
+          if (i < attempts.length - 1) await new Promise(resolve => setTimeout(resolve, 300 * (i + 1)))
+        }
       }
-      return data
+      throw lastError
     }
 
     // 正文兜底渲染：模块级常量，保证引用稳定（见 renderAssistantText 里的说明）
@@ -868,6 +903,34 @@ function versionsOf(jobId) {
         )
       }
 
+      // 没有计划：先看正文里有没有模型自己写的 image###Tag### 标记（自动生图开的那个通道）。
+      // 有就按标记切段、就地出图 —— 只按标记切（通常 4 段以内），不是按行切，不会把 markdown 渲染几十次。
+      // 宿主按 key 去重，同一条消息的同一个位置永远只画一次，翻历史、刷新页面都复用同一张。
+      const segments = splitSegments(text)
+      let markerCount = 0
+      for (const segment of segments) if (segment.type === 'image') markerCount += 1
+      if (markerCount) {
+        const owner = String(messageId ?? 'x')
+        reportHost('inline-markers', { messageId: owner.slice(0, 14), markers: markerCount, textLen: String(text ?? '').length })
+        return h(React.Fragment, null, segments.map((segment, index) => (
+          segment.type === 'image'
+            ? h(InlineImage, {
+              key: 'marker-img-' + index,
+              prompt: segment.prompt,
+              imageKey: contentKey(messageId, turn, index, segment.prompt),
+              auto: true,
+            })
+            : h(Segment, {
+              key: 'marker-text-' + index,
+              value: segment.value,
+              index,
+              renderText,
+              keyName: 'marker-text-' + owner + '-' + index,
+              messageId, turn, sessionId,
+            })
+        )))
+      }
+
       // 没有图：整段交给宿主渲染一次（不切段、不加重排），和原生完全一样
       const body = renderText(text, 'rphub-body-' + String(messageId ?? 'x'))
       const canDraw = String(text ?? '').trim().length >= 12
@@ -931,9 +994,25 @@ function versionsOf(jobId) {
         if (context?.streaming) return null
         const renderText = typeof context?.renderText === 'function' ? context.renderText : null
         if (!renderText) return null
+        // 卡片工作台（Tavern 的 mode === "card"）不生成插图、也不接管正文：
+        // 这里是"改卡"的地方，正文里出现的 image### 标记不该在这里被画成图。
+        // 判定来自 Tavern 侧渲染补丁给出的 cardBench 字段（见 message-frame.js）。
+        // 注意：Tavern 宿主已经对"消息级动作"做了 isPlayMode 判定，所以「🎨 生图」按钮
+        // 本来就不在工作台出现，这里补的是正文渲染这一条路径。
+        if (context?.cardBench) {
+          // 卡片工作台：绝不出图。
+          // 正常情况这里没有任何标记，直接返回 null 让 Tavern 原生渲染，零影响；
+          // 万一模型还是写了 image### 标记（自动生图规则会跟到所有请求），就把它清掉再渲染，
+          // 免得工作台的正文里露出一串标记。
+          const original = String(text ?? '')
+          const cleaned = original.replace(new RegExp(IMAGE_TAG.source, 'gi'), '').replace(/\n{3,}/g, '\n\n').trim()
+          if (cleaned === original.trim()) return null
+          reportHost('cardbench-stripped', { messageId: String(context?.messageId ?? '').slice(0, 14), removed: original.length - cleaned.length })
+          return h(React.Fragment, null, renderText(cleaned, 'card-bench-' + String(context?.messageId ?? 'x')))
+        }
         // 不再依赖 turn：Tavern 的渲染链路只服务游玩对话，工作台/设置页不走这里，
         // 所以"只在游玩时出现"是天然成立的（之前按 turn 判定导致按钮永不出现）。
-        reportHost('renderer-takeover', { messageId: String(context?.messageId ?? ''), textLen: String(text ?? '').length })
+        reportHost('renderer-takeover', { messageId: String(context?.messageId ?? ''), turn: context?.turn, cardBench: Boolean(context?.cardBench), textLen: String(text ?? '').length })
         return h(PlannedBody, {
           text: String(text ?? ''),
           messageId: context?.messageId,
@@ -1270,6 +1349,11 @@ function versionsOf(jobId) {
       // 历史图库
       const [historyJobs, setHistoryJobs] = React.useState([])
       const [historyNote, setHistoryNote] = React.useState('')
+      // 历史图的重载信号：切 tab 与点「刷新」都靠它真正重跑一次拉取。
+      // 原来「刷新」是 setTab('plan') + setTimeout(setTab('gallery'))，依赖 [tab] 时
+      // 在 React 批处理下常常不产生两次真实变化，effect 不重跑 —— 界面就一直停在
+      // 上次失败的「读不到: Failed to fetch」，点多少次刷新都不会更新。
+      const [historyTick, setHistoryTick] = React.useState(0)
       // 历史图：批量选择模式
       const [gallerySelect, setGallerySelect] = React.useState(false)
       const [galleryPicked, setGalleryPicked] = React.useState({})
@@ -1305,11 +1389,16 @@ function versionsOf(jobId) {
       function refresh() {
         if (refreshInFlight.current) return Promise.resolve()
         refreshInFlight.current = true
-        jsonFetch(BASE + '/state').then(setData).catch(e => setNote('读不到状态：' + (e && e.message ? e.message : e)))
+        jsonFetch(BASE + '/state').then(setData).catch(e => {
+          setNote('读不到状态：' + (e && e.message ? e.message : e))
+          reportHost('state-fail', { msg: String(e?.message ?? e), base: BASE })
+        })
         refreshInFlight.current = false
       }
       React.useEffect(() => { refresh() }, [])
-      React.useEffect(() => { loadProviders(); loadComfyStatus() }, [])
+      React.useEffect(() => { loadProviders() }, [])
+      // 等 /state 到位再测 ComfyUI：那时才拿得到 comfyUrl，也避开首次渲染的 config TDZ
+      React.useEffect(() => { if (data) loadComfyStatus() }, [Boolean(data)])
       // 任务轮询：依赖写成 [] 并在内部读最新数据（原来依赖 data，
       // 每轮 refresh 都会让 effect 重建，慢的时候会叠起一堆请求）
       React.useEffect(() => {
@@ -1325,11 +1414,22 @@ function versionsOf(jobId) {
         setHistoryNote('读取中…')
         jsonFetch(BASE + '/history', { cache: 'no-store' }).then(r => {
           if (!alive) return
-          setHistoryJobs(r?.jobs ?? [])
-          setHistoryNote((r?.jobs ?? []).length ? '' : '还没有生成过图片')
-        }).catch(error => { if (alive) setHistoryNote('读不到：' + (error?.message ?? error)) })
+          const list = r?.jobs ?? []
+          setHistoryJobs(list)
+          setHistoryNote(list.length ? '' : '还没有生成过图片')
+          reportHost('history-ok', { jobs: list.length })
+        }).catch(error => {
+          if (!alive) return
+          setHistoryNote('读不到：' + (error?.message ?? error))
+          reportHost('history-fail', {
+            name: String(error?.name ?? ''),
+            msg: String(error?.message ?? error),
+            stack: String(error?.stack ?? '').slice(0, 400),
+            url: BASE + '/history',
+          })
+        })
         return () => { alive = false }
-      }, [tab])
+      }, [tab, historyTick])
 
       function post(pathname, body) {
         return jsonFetch(BASE + pathname, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
@@ -2591,7 +2691,7 @@ function versionsOf(jobId) {
           h('div', { style: { fontSize: '13px', marginBottom: '4px' } }, '历史图片（' + done.length + ' / ' + historyJobs.length + ' 张）'),
           h('div', { style: { fontSize: '12px', color: '#9aa3b2', marginBottom: '10px' } }, '左键看大图（可以左右翻整个历史库），右键出菜单，鼠标移到图上右上角能直接删。'),
           h('div', { style: S.row },
-            h('button', { style: buttonStyle, onClick: function () { setHistoryJobs([]); setTab('plan'); setTimeout(function () { setTab('gallery') }, 0) } }, '🔄 刷新'),
+            h('button', { style: buttonStyle, onClick: function () { setHistoryNote('读取中…'); setHistoryTick(n => n + 1) } }, '🔄 刷新'),
             h('button', { style: buttonStyle, onClick: function () {
               if (typeof openImageOverlay === 'function' && done.length) openImageOverlay({ open: true, jobIds: done.map(function (job) { return job.id }), note: '全部历史（◀ ▶ 翻页）', working: false, index: 0 })
             } }, '🖼 全部打开'),
@@ -2623,7 +2723,12 @@ function versionsOf(jobId) {
       /** 测 ComfyUI 连接。 */
       async function loadComfyStatus() {
         setComfyStatus({ checking: true })
-        const r = await post('/comfy-test', { url: config.comfyUrl }).catch(e => ({ ok: false, error: String(e?.message ?? e) }))
+        // ⚠ 这里不能用 config：data 为空时组件在第 1346 行提前 return，同作用域的
+        //   `const config = data.config || {}` 从未执行，直接读会抛
+        //   ReferenceError: Cannot access 'config' before initialization（TDZ）。
+        //   走 dataRef 取最新值，既避开 TDZ，也拿到真正加载完的配置。
+        const url = String(dataRef.current?.config?.comfyUrl ?? '')
+        const r = await post('/comfy-test', { url }).catch(e => ({ ok: false, error: String(e?.message ?? e) }))
         setComfyStatus(r)
       }
 
@@ -2882,7 +2987,27 @@ function versionsOf(jobId) {
           } catch {}
         }
       }, [])
-      if (!open) return h('div', { style: { display: 'none' }, 'aria-hidden': 'true' })
+      // 收起状态：右下角一个常驻小按钮（不依赖任何侧栏槽位，一定能显示）
+      if (!open) {
+        return h('div', {
+          style: {
+            position: 'fixed', right: '18px', bottom: '86px', zIndex: 2147483000,
+            display: 'flex', flexDirection: 'column', gap: '6px', alignItems: 'flex-end',
+          },
+        },
+          h('button', {
+            title: '本地生图控制台（人物库 / 历史图 / 世界书 / 画风）',
+            style: {
+              display: 'flex', alignItems: 'center', gap: '6px',
+              background: '#161b23', color: '#e6ebf3',
+              border: '1px solid rgba(255,255,255,.18)', borderRadius: '999px',
+              padding: '9px 15px', cursor: 'pointer', fontSize: '13px',
+              boxShadow: '0 6px 20px rgba(0,0,0,.45)',
+            },
+            onClick: () => setOpen(true),
+          }, '🎨 本地生图'),
+        )
+      }
       return h('div', {
         style: {
           position: 'fixed', inset: 0, zIndex: 2147483100,
@@ -2906,19 +3031,6 @@ function versionsOf(jobId) {
         ),
         h(SettingsPanel),
       ))
-    }
-
-    /** 侧栏底部的小按钮 */
-    function ConsoleLauncher() {
-      return h('button', {
-        style: {
-          display: 'flex', alignItems: 'center', gap: '8px', width: '100%',
-          background: 'transparent', border: 'none', color: 'inherit',
-          padding: '8px 10px', borderRadius: '8px', cursor: 'pointer',
-          fontSize: '13px', textAlign: 'left',
-        },
-        onClick: () => { try { window.dispatchEvent(new CustomEvent('dsh-tavern-comfy:open-console')) } catch {} },
-      }, '🎨 本地生图')
     }
 
     function apply(ctx) {
@@ -2957,18 +3069,6 @@ function versionsOf(jobId) {
           reportHost('seat-registered', { seat: 'shell.overlay.console' })
         } catch (error) {
           reportHost('seat-failed', { seat: 'shell.overlay.console', error: String(error?.message ?? error).slice(0, 120) })
-        }
-
-        // ★ 侧栏入口按钮
-        try {
-          ctx.slots?.inject?.('sidebar.footer.action', () => ctx.slots.register({
-            name: 'sidebar.footer.action',
-            id: 'dsh-tavern-comfy-launcher',
-            order: 50,
-          }, ConsoleLauncher))
-          reportHost('seat-registered', { seat: 'sidebar.footer.action' })
-        } catch (error) {
-          reportHost('seat-failed', { seat: 'sidebar.footer.action', error: String(error?.message ?? error).slice(0, 120) })
         }
 
         // 全屏看图浮层
