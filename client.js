@@ -800,7 +800,7 @@ function versionsOf(jobId) {
           close()
           if (typeof openImageOverlay === 'function') (() => {
                   const chain = versionsOf(r.jobId)
-                  openImageOverlay({ open: true, jobIds: chain, note: '重画完成（◀ ▶ 对比历史版本）', working: false, index: chain.length - 1 })
+                  openImageOverlay({ open: true, jobIds: chain, versions: chain, versionAt: chain.length - 1, note: '重画完成（下方可对比历史版本）', working: false, index: chain.length - 1 })
                 })()
         } catch (error) {
           say('失败：' + (error?.message ?? error))
