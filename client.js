@@ -876,8 +876,12 @@ function versionsOf(jobId) {
       try {
         if (!jobId) return
         if (typeof openImageOverlay !== 'function') return
-        // 翻页列表优先用"整场对话里出过图的作业"——这样在正文里点开也能左右翻上一张/下一张。
-        // 取不到、或这张不在列表里时，退回重画版本链。
+        const id = String(jobId)
+        const label = String(title || '插图')
+        // 这张图自己的重画版本链（独立于整场翻页）
+        const chain = versionsOf(id)
+
+        // 主翻页列表：整场对话里出过图的作业（旧 → 新）。拿不到就退回版本链。
         let list = []
         try {
           const r = await jsonFetch(BASE + '/history')
@@ -887,17 +891,20 @@ function versionsOf(jobId) {
             .map(job => String(job.id))
             .reverse()
         } catch { /* 拿不到历史就退回版本链 */ }
-        if (!list.includes(String(jobId))) list = versionsOf(jobId)
-        const at = Math.max(0, list.indexOf(String(jobId)))
-        const label = String(title || '插图')
+        if (!list.includes(id)) list = chain
+
+        const at = Math.max(0, list.indexOf(id))
+        const versionAt = Math.max(0, chain.indexOf(id))
         openImageOverlay({
           open: true,
           jobIds: list,
-          note: list.length > 1
-            ? (label + '（' + (at + 1) + '/' + list.length + '　◀ ▶ 或 ← → 翻页，滚轮缩放，按住拖动）')
-            : label,
-          working: false,
           index: at,
+          versions: chain,
+          versionAt: versionAt,
+          working: false,
+          note: label
+            + (list.length > 1 ? '　第 ' + (at + 1) + ' / ' + list.length + ' 张' : '')
+            + (chain.length > 1 ? '　（这张有 ' + chain.length + ' 个重画版本）' : ''),
         })
       } catch { /* 看图失败不影响正文 */ }
     }
@@ -1283,13 +1290,24 @@ function versionsOf(jobId) {
         event.preventDefault()
         setPos({ x: touch.clientX - dragRef.current.x, y: touch.clientY - dragRef.current.y })
       }, [])
-      openImageOverlay = (next) => setView(current => Object.assign({}, current, next && next.open ? Object.assign({ index: 0 }, next) : next))
-      const close = () => openImageOverlay({ open: false, jobIds: [], note: '', working: false, index: 0 })
+      openImageOverlay = (next) => setView(current => Object.assign({}, current, next && next.open ? Object.assign({ index: 0, versionAt: 0 }, next) : next))
+      const close = () => openImageOverlay({ open: false, jobIds: [], versions: [], versionAt: 0, note: '', working: false, index: 0 })
       const total = view.jobIds.length
       const at = total ? Math.max(0, Math.min(total - 1, Number(view.index) || 0)) : 0
+      // 当前这张图自己的重画版本链（与整场翻页互不影响）
+      const versions = Array.isArray(view.versions) ? view.versions : []
+      const vTotal = versions.length
+      const vAt = vTotal ? Math.max(0, Math.min(vTotal - 1, Number(view.versionAt) || 0)) : 0
+      // 真正显示的那张：有版本链就用版本链的当前版，否则用主列表的当前张
+      const shownId = vTotal ? versions[vAt] : view.jobIds[at]
       const go = (delta) => {
         if (total < 2) return
-        openImageOverlay({ index: (at + delta + total) % total })
+        // 翻整场的时候把版本链清掉，免得两张图的版本串在一起
+        openImageOverlay({ index: (at + delta + total) % total, versions: [], versionAt: 0 })
+      }
+      const goVersion = (delta) => {
+        if (vTotal < 2) return
+        openImageOverlay({ versionAt: (vAt + delta + vTotal) % vTotal })
       }
       React.useEffect(() => {
         if (!view.open || total < 2) return undefined
@@ -1364,7 +1382,8 @@ function versionsOf(jobId) {
           }, '›') : null,
           // 一次只显示当前这张，左右按钮切换
           // 一次只显示当前这张；可拖动平移、滚轮缩放
-          view.jobIds.slice(at, at + 1).map(id => React.createElement('img', {
+          // 只显示当前这一张（shownId：有重画版本就用版本里的当前版）
+          [shownId].filter(Boolean).map(id => React.createElement('img', {
             key: id,
             src: BASE + '/jobs?id=' + encodeURIComponent(id) + '&image=1',
             alt: view.note || '插图',
@@ -1372,13 +1391,29 @@ function versionsOf(jobId) {
             onWheel: onWheel, onMouseDown: onDragStart, onMouseMove: onDragMove, onMouseUp: onDragEnd,
             onMouseLeave: onDragEnd, onTouchStart: onTouchStart, onTouchMove: onTouchMove, onTouchEnd: onDragEnd,
             style: {
-              display: 'block', maxWidth: '100%', maxHeight: 'calc(100vh - 132px)', width: 'auto', height: 'auto',
+              display: 'block', maxWidth: '100%', maxHeight: 'calc(100vh - 200px)', width: 'auto', height: 'auto',
               objectFit: 'contain', borderRadius: '12px', background: '#1a1d24',
               cursor: zoom > 1 ? 'grab' : 'default', userSelect: 'none', touchAction: 'none',
               transform: 'translate(' + pos.x + 'px,' + pos.y + 'px) scale(' + zoom + ')',
               transition: dragging ? 'none' : 'transform .12s',
             },
           })),
+          // 这张图自己的重画版本（跟上面"整场翻页"是两回事），只有多于 1 版才显示
+          vTotal > 1 ? React.createElement('div', {
+            style: { display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px', marginTop: '12px', position: 'relative', zIndex: 2147483006 },
+            onClick: event => event.stopPropagation(),
+          },
+            React.createElement('span', { style: { fontSize: '12px', color: '#9aa3b2' } }, '重画版本'),
+            React.createElement('button', {
+              type: 'button', onClick: () => goVersion(-1), title: '上一个版本',
+              style: { padding: '3px 12px', fontSize: '13px', borderRadius: '8px', border: '1px solid rgba(160,180,210,.5)', background: 'rgba(255,255,255,.06)', color: '#dbe3ee', cursor: 'pointer' },
+            }, '◀'),
+            React.createElement('span', { style: { fontSize: '12px', color: '#c8d2e0', minWidth: '40px', textAlign: 'center' } }, (vAt + 1) + ' / ' + vTotal),
+            React.createElement('button', {
+              type: 'button', onClick: () => goVersion(1), title: '下一个版本',
+              style: { padding: '3px 12px', fontSize: '13px', borderRadius: '8px', border: '1px solid rgba(160,180,210,.5)', background: 'rgba(255,255,255,.06)', color: '#dbe3ee', cursor: 'pointer' },
+            }, '▶'),
+          ) : null,
         ),
         view.jobIds.length ? React.createElement('div', { style: { color: '#8b95a5', fontSize: '12px', textAlign: 'center', paddingBottom: '20px' } }, '点空白处关闭' + (total > 1 ? '　也可以点两侧的 ‹ › 或按 ← → 切换' : '')) : null,
       ))
