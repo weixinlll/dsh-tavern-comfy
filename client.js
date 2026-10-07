@@ -2861,6 +2861,66 @@ function versionsOf(jobId) {
         h('div', { style: { fontSize: '11px', color: '#6b7480', marginTop: '14px' } }, '配置存在插件的 config.json / definitions.json；这个页面的修改立即生效。'),
       )
     }
+    // ─────────────────────────────────────────────────────────────
+    // 控制台浮层：把整套设置界面搬到「主窗口」显示
+    // DSH 的「设置」是独立渲染上下文，访问 127.0.0.1 会被拒（fetch/XHR 都失败），
+    // 所以设置页里的面板读不到数据；主窗口正常，这里提供一个等效入口。
+    // ─────────────────────────────────────────────────────────────
+    function ConsoleOverlay() {
+      const [open, setOpen] = React.useState(false)
+      React.useEffect(() => {
+        const onOpen = () => setOpen(true)
+        const onKey = event => { if (event.key === 'Escape') setOpen(false) }
+        try {
+          window.addEventListener('dsh-tavern-comfy:open-console', onOpen)
+          window.addEventListener('keydown', onKey)
+        } catch {}
+        return () => {
+          try {
+            window.removeEventListener('dsh-tavern-comfy:open-console', onOpen)
+            window.removeEventListener('keydown', onKey)
+          } catch {}
+        }
+      }, [])
+      if (!open) return h('div', { style: { display: 'none' }, 'aria-hidden': 'true' })
+      return h('div', {
+        style: {
+          position: 'fixed', inset: 0, zIndex: 2147483100,
+          background: 'rgba(6,9,14,.86)', display: 'flex',
+          alignItems: 'center', justifyContent: 'center', padding: '18px',
+        },
+        onClick: event => { if (event.target === event.currentTarget) setOpen(false) },
+      }, h('div', {
+        style: {
+          width: 'min(1180px, 96vw)', height: 'min(86vh, 900px)', overflow: 'auto',
+          background: '#0f131a', border: '1px solid rgba(255,255,255,.12)',
+          borderRadius: '14px', padding: '16px',
+        },
+      },
+        h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' } },
+          h('div', { style: { fontSize: '15px', fontWeight: 600 } }, '🎨 本地生图控制台'),
+          h('button', {
+            style: { background: 'transparent', color: '#dfe4ec', border: '1px solid rgba(255,255,255,.2)', borderRadius: '8px', padding: '4px 12px', cursor: 'pointer' },
+            onClick: () => setOpen(false),
+          }, '关闭 ✕'),
+        ),
+        h(SettingsPanel),
+      ))
+    }
+
+    /** 侧栏底部的小按钮 */
+    function ConsoleLauncher() {
+      return h('button', {
+        style: {
+          display: 'flex', alignItems: 'center', gap: '8px', width: '100%',
+          background: 'transparent', border: 'none', color: 'inherit',
+          padding: '8px 10px', borderRadius: '8px', cursor: 'pointer',
+          fontSize: '13px', textAlign: 'left',
+        },
+        onClick: () => { try { window.dispatchEvent(new CustomEvent('dsh-tavern-comfy:open-console')) } catch {} },
+      }, '🎨 本地生图')
+    }
+
     function apply(ctx) {
       // 诊断：证明 apply 被调到，并看清 ctx 上到底有什么
       try {
@@ -2886,6 +2946,30 @@ function versionsOf(jobId) {
             settings.plannerEnabled = state.config.plannerEnabled !== false
           }
         }).catch(() => { /* 拿不到配置就安静退化成只在有标记时出图 */ })
+
+        // ★ 控制台浮层（主窗口，网络可用）
+        try {
+          ctx.slots?.inject?.('shell.overlay', () => ctx.slots.register({
+            name: 'shell.overlay',
+            id: 'dsh-tavern-comfy-console',
+            order: 95,
+          }, ConsoleOverlay))
+          reportHost('seat-registered', { seat: 'shell.overlay.console' })
+        } catch (error) {
+          reportHost('seat-failed', { seat: 'shell.overlay.console', error: String(error?.message ?? error).slice(0, 120) })
+        }
+
+        // ★ 侧栏入口按钮
+        try {
+          ctx.slots?.inject?.('sidebar.footer.action', () => ctx.slots.register({
+            name: 'sidebar.footer.action',
+            id: 'dsh-tavern-comfy-launcher',
+            order: 50,
+          }, ConsoleLauncher))
+          reportHost('seat-registered', { seat: 'sidebar.footer.action' })
+        } catch (error) {
+          reportHost('seat-failed', { seat: 'sidebar.footer.action', error: String(error?.message ?? error).slice(0, 120) })
+        }
 
         // 全屏看图浮层
         try {
