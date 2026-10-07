@@ -142,6 +142,11 @@ API 根地址   [http://127.0.0.1:8188        ]
 | 正文里的 `image###` 标记 | `tavernUi.registerTextMarker` |
 | 图怎么显示、多大、右键菜单 | `tavernUi.registerMediaRenderer`（自定义媒体类型，显示归自己管） |
 | 生图规则注入 | `tavern.promptSection` |
+| 当前玩的是哪张卡 | `getTurn` / `onTurnSettled` 回调里的 `card` 字段 —— 不去翻会话目录 |
+| 卡的设定与世界书 | `tavern.getCardContext` —— 不自己解析卡片文件 |
+| 默认后台模型 | `tavern.backgroundModel` —— 不读 `tavern-settings.json` |
+
+**插件不写别人的数据。** 以前它会在规划前往「你正在玩的那张卡」的文件里塞一条显示正则，现在整块删掉了 —— 直接改用户的卡片会绕过 Tavern 的卡片管理与备份，而且图早就不靠那条正则显示。
 
 适配层集中在一个文件：`lib/tavern-bridge.js`。
 
