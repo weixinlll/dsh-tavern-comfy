@@ -103,8 +103,8 @@ let openImageOverlay = null
       } catch { /* 报告本身绝不能影响功能 */ }
     }
     // 客户端版本戳：重启 DSH 后可以在 /state 的 clientReports 里确认加载的是哪一版
-    const CLIENT_BUILD = 'client-2026-10-07-2010'
-    reportHost('bundle-evaluated', { at: Date.now(), href: String(location?.href ?? '').slice(0, 120), build: CLIENT_BUILD, features: 'wb-tab,batch-del,big-nav,artist-sets,ctx-menu' })
+    const CLIENT_BUILD = 'client-2026-10-08-character-batch'
+    reportHost('bundle-evaluated', { at: Date.now(), href: String(location?.href ?? '').slice(0, 120), build: CLIENT_BUILD, features: 'character-batch,fold-all,safe-design-save,single-caption' })
 
     try {
       window.addEventListener('error', event => {
@@ -399,6 +399,7 @@ let openImageOverlay = null
       if (imgError) {
         return h('div', { style: wrapStyle }, h('span', { style: noteStyle }, '🎨 正在取回…（第 ' + imgRetry + ' 次）'))
       }
+      // TavernPluginMediaItem 会统一追加 figcaption；这里保留 alt 和预览标题即可。
       return h('div', { style: wrapStyle },
         h('img', {
           key: 'official-img-' + imgNonce, src, loading: 'lazy', decoding: 'async', alt: title || '插图',
@@ -413,8 +414,7 @@ let openImageOverlay = null
           onMouseUp: cancelPress, onMouseLeave: cancelPress,
           onTouchStart: () => beginPress(jobId, title),
           onTouchEnd: cancelPress, onTouchMove: cancelPress,
-        }),
-        title ? h('div', { style: { fontSize: '12px', color: '#9aa3b2', textAlign: 'center', margin: '-4px 0 12px' } }, title) : null)
+        }))
     }
 
     /** 段落：只渲染正文，不再带「画这段」按钮（生图入口统一在消息下方）。 */
@@ -1550,18 +1550,46 @@ function versionsOf(jobId) {
     }
 
     function SettingsPanel() {
-      const [data, setData] = React.useState(null)
+      const [data, setDataState] = React.useState(null)
       // 让定时器/异步回调读到"最新的" data，而不用把它写进 effect 依赖
       const dataRef = React.useRef(null)
       dataRef.current = data
+      const libraryDirty = React.useRef(false)
+      const libraryRevision = React.useRef(0)
+      const librarySaveQueue = React.useRef(Promise.resolve())
+      function setData(update) {
+        const next = typeof update === 'function' ? update(dataRef.current) : update
+        dataRef.current = next
+        setDataState(next)
+      }
+      function receiveState(next, requestRevision) {
+        if (!next) return
+        const current = dataRef.current
+        setData((libraryDirty.current || (typeof requestRevision === 'number' && requestRevision !== libraryRevision.current)) && current
+          ? Object.assign({}, next, { definitions: current.definitions, outfits: current.outfits })
+          : next)
+      }
+      function setLibraryData(update) {
+        libraryDirty.current = true
+        libraryRevision.current += 1
+        setData(update)
+        setSaveState('')
+      }
       const [tab, setTab] = React.useState('plan')
       const [note, setNote] = React.useState('')
       const [planText, setPlanText] = React.useState('')
       const [planRows, setPlanRows] = React.useState(null)
-      const [photoTarget, setPhotoTarget] = React.useState(0)
       // 哪一行正在展开"选择绑定卡片"（-1 = 都没展开）；内联展开，不用浮层
       const [cardPickerFor, setCardPickerFor] = React.useState(-1)
       const [cardList, setCardList] = React.useState([])
+      const [peopleOpen, setPeopleOpen] = React.useState({})
+      const [peoplePicked, setPeoplePicked] = React.useState({})
+      const [peopleBatchOpen, setPeopleBatchOpen] = React.useState(false)
+      const [peopleBatchField, setPeopleBatchField] = React.useState('feature')
+      const [peopleBatchMode, setPeopleBatchMode] = React.useState('replace')
+      const [peopleBatchValue, setPeopleBatchValue] = React.useState('')
+      const [peopleBatchCards, setPeopleBatchCards] = React.useState([])
+      const [peopleBatchNote, setPeopleBatchNote] = React.useState('')
       // 设计角色：内联展开（不用浮层，设置面板层级更高会挡住）
       const [designOpen, setDesignOpen] = React.useState(false)
       const [designBrief, setDesignBrief] = React.useState('')
@@ -1570,13 +1598,15 @@ function versionsOf(jobId) {
       const [designName, setDesignName] = React.useState('')
       const [designNote, setDesignNote] = React.useState('')
       const [designBusy, setDesignBusy] = React.useState(false)
-      // 改进模式：记录要改哪个角色（-1 = 新建）
-      const [improveTarget, setImproveTarget] = React.useState(-1)
+      const [designPanelBusy, setDesignPanelBusy] = React.useState(false)
+      const designInFlight = React.useRef(false)
+      // 改进模式：记录角色 id（空 = 新建），不受删除、排序影响。
+      const [improveTarget, setImproveTarget] = React.useState('')
       // 设计完成后的醒目提醒（未保存）
       const [designDone, setDesignDone] = React.useState('')
-      // 每个角色的"改进要求"草稿（索引 → 文本），常驻显示，不用先点按钮
+      // 用稳定 id 保存改进草稿；删除前面的角色不会让草稿移到另一位身上。
       const [improveDraft, setImproveDraft] = React.useState({})
-      // 正在跑的改进任务（按角色索引去重，不妨碍连续生成别的）
+      // 正在跑的改进任务（按角色 id 去重，不妨碍连续生成别的）
       const improveInFlight = React.useRef({})
       // 保存状态：'' 空闲 / 'saving' / 'saved' / 'failed:原因'
       const [saveState, setSaveState] = React.useState('')
@@ -1623,11 +1653,11 @@ function versionsOf(jobId) {
       function refresh() {
         if (refreshInFlight.current) return Promise.resolve()
         refreshInFlight.current = true
-        jsonFetch(BASE + '/state').then(setData).catch(e => {
+        const revision = libraryRevision.current
+        return jsonFetch(BASE + '/state').then(next => receiveState(next, revision)).catch(e => {
           setNote('读不到状态：' + (e && e.message ? e.message : e))
           reportHost('state-fail', { msg: String(e?.message ?? e), base: BASE })
-        })
-        refreshInFlight.current = false
+        }).finally(() => { refreshInFlight.current = false })
       }
       React.useEffect(() => { refresh() }, [])
       React.useEffect(() => { loadProviders() }, [])
@@ -1670,9 +1700,10 @@ function versionsOf(jobId) {
       }
       async function save(patch) {
         setNote('保存中…')
+        const revision = libraryRevision.current
         try {
           const r = await post('/config', { config: patch })
-          setData(r.state)
+          receiveState(r.state, revision)
           setNote('已保存')
         } catch (e) { setNote('保存失败：' + (e && e.message ? e.message : e)) }
       }
@@ -1913,66 +1944,142 @@ function versionsOf(jobId) {
       // ---- 人物库（人物设计）----
       function peopleTab() {
         const characters = (data.definitions && data.definitions.characters) || []
+        const picked = characters.filter(character => peoplePicked[character.id])
+        const batchFields = [
+          ['feature', '角色特征'], ['face', '五官外貌'], ['faceBack', '五官外貌背面'],
+          ['bodySFW', '上半身SFW'], ['bodySFWBack', '上半身SFW背面'], ['lowerSFW', '下半身SFW'], ['lowerSFWBack', '下半身SFW背面'],
+          ['bodyNSFW', '上半身NSFW'], ['bodyNSFWBack', '上半身NSFW背面'], ['lowerNSFW', '下半身NSFW'], ['lowerNSFWBack', '下半身NSFW背面'],
+          ['negative', '负面'], ['match', '英文触发名'], ['continuity', '状态与变化'], ['note', '备注'], ['enabled', '启用状态'], ['cards', '绑定卡片'],
+        ]
+
+        function applyBatch() {
+          const selected = new Set(picked.map(character => character.id))
+          if (!selected.size) { setPeopleBatchNote('请先选择角色'); return }
+          if (peopleBatchMode === 'append' && peopleBatchField !== 'enabled' && !peopleBatchValue.trim() && (peopleBatchField !== 'cards' || !peopleBatchCards.length)) {
+            setPeopleBatchNote('先填写要追加的内容'); return
+          }
+          setCharacters(current => current.map(character => {
+            if (!selected.has(character.id)) return character
+            if (peopleBatchField === 'enabled') return Object.assign({}, character, { enabled: peopleBatchValue !== 'false' })
+            if (peopleBatchField === 'cards') return Object.assign({}, character, { cards: peopleBatchMode === 'append' ? [...new Set([...(character.cards || []), ...peopleBatchCards])] : peopleBatchCards.slice() })
+            const topLevel = ['match', 'continuity', 'note'].includes(peopleBatchField)
+            const previous = String((topLevel ? character[peopleBatchField] : character.traits?.[peopleBatchField]) || '')
+            const value = peopleBatchMode === 'append' && previous.trim()
+              ? previous + (['continuity', 'note'].includes(peopleBatchField) ? '\n' : ', ') + peopleBatchValue.trim()
+              : peopleBatchValue
+            return topLevel
+              ? Object.assign({}, character, { [peopleBatchField]: value })
+              : Object.assign({}, character, { traits: Object.assign({}, character.traits, { [peopleBatchField]: value }) })
+          }))
+          setPeopleBatchNote('已修改 ' + selected.size + ' 位角色，请点「保存人物库」')
+        }
+
+        function batchPanel() {
+          if (!peopleBatchOpen) return null
+          return h('div', { style: Object.assign({}, S.card, { margin: '8px 0 12px', background: 'rgba(106,168,255,.04)' }) },
+            h('div', { style: S.row },
+              h('span', { style: S.label }, '批量编辑'),
+              h('select', { 'aria-label': '批量编辑字段', value: peopleBatchField, style: S.input, onChange: async event => {
+                const field = event.target.value
+                setPeopleBatchField(field)
+                setPeopleBatchValue(field === 'enabled' ? 'true' : '')
+                setPeopleBatchNote('')
+                if (field === 'cards') {
+                  try { const r = await jsonFetch(BASE + '/cards'); setCardList(r?.cards || []) } catch { setPeopleBatchNote('读取卡片失败，请重新选择「绑定卡片」') }
+                }
+              } }, batchFields.map(([key, label]) => h('option', { key, value: key }, label))),
+              peopleBatchField === 'enabled' ? null : h('select', { 'aria-label': '批量编辑方式', value: peopleBatchMode, style: S.input, onChange: event => setPeopleBatchMode(event.target.value) },
+                h('option', { value: 'replace' }, '覆盖'), h('option', { value: 'append' }, '追加')),
+              h('span', { style: { fontSize: '12px', color: '#9aa3b2' } }, '只修改选中的 ' + picked.length + ' 位角色'),
+            ),
+            peopleBatchField === 'enabled'
+              ? h('select', { 'aria-label': '批量启用状态', value: peopleBatchValue === 'false' ? 'false' : 'true', style: S.input, onChange: event => setPeopleBatchValue(event.target.value) }, h('option', { value: 'true' }, '启用'), h('option', { value: 'false' }, '禁用'))
+              : peopleBatchField === 'cards'
+                ? h('div', { style: { display: 'flex', gap: '10px', flexWrap: 'wrap', maxHeight: '180px', overflowY: 'auto' } },
+                  cardList.length ? cardList.map(card => h('label', { key: card.path, style: { fontSize: '12px' } },
+                    h('input', { type: 'checkbox', checked: peopleBatchCards.includes(card.path), onChange: event => { const checked = event.target.checked; setPeopleBatchCards(current => checked ? [...new Set([...current, card.path])] : current.filter(path => path !== card.path)) } }), ' ' + card.name))
+                    : h('span', { style: { fontSize: '12px', color: '#9aa3b2' } }, '暂无卡片可选'),
+                )
+                : h('textarea', { 'aria-label': '批量编辑内容', value: peopleBatchValue, placeholder: '填写要应用到所选角色的内容', rows: 3, style: Object.assign({}, S.input, { width: '100%', boxSizing: 'border-box', fontFamily: 'inherit' }), onChange: event => setPeopleBatchValue(event.target.value) }),
+            h('div', { style: S.row },
+              h('button', { style: buttonStyle, disabled: !picked.length, onClick: applyBatch }, '应用到所选角色'),
+              h('span', { style: { fontSize: '12px', color: '#9aa3b2' } }, peopleBatchField === 'cards' && peopleBatchMode === 'replace' && !peopleBatchCards.length ? '未选卡片时清除绑定，所有卡片都能使用' : peopleBatchMode === 'replace' && peopleBatchField !== 'enabled' ? '覆盖会替换原内容；文本留空会清空该字段' : '应用后点保存即可写入人物库'),
+            ),
+            peopleBatchNote ? h('div', { role: 'status', style: { fontSize: '12px', color: '#9aa3b2' } }, peopleBatchNote) : null,
+          )
+        }
 
         function blankCharacter() {
           const traits = {}
           for (const key of ["feature","face","faceBack","bodySFW","bodySFWBack","lowerSFW","lowerSFWBack","bodyNSFW","bodyNSFWBack","lowerNSFW","lowerNSFWBack","negative"]) traits[key] = ''
-          return { id: 'c' + Date.now(), name: '', match: '', enabled: true, continuity: '', note: '', inject: {}, cards: [], outfitRefs: [], traits,
+          return { id: 'c' + Date.now() + Math.random().toString(36).slice(2, 6), name: '', match: '', enabled: true, continuity: '', note: '', inject: {}, cards: [], outfitRefs: [], traits,
             outfits: [{ id: 'o' + Date.now(), name: '常服', upper: '', lower: '', shoes: '', accessory: '', full: '', back: '', negative: '', enabled: true, default: true }] }
         }
         // 注意：peopleTab 是被调用的普通函数，不能用 hooks（会让 SettingsPanel 的 hooks 数不稳定）
-      onDesignResult = () => { refresh() }
-      function setCharacters(next) {
-          setData(Object.assign({}, data, { definitions: Object.assign({}, data.definitions, { characters: next }) }))
+        onDesignResult = () => { refresh() }
+        function setCharacters(update) {
+          const current = dataRef.current
+          const before = current?.definitions?.characters || []
+          const next = typeof update === 'function' ? update(before) : update
+          setLibraryData(Object.assign({}, current, { definitions: Object.assign({}, current.definitions, { characters: next }) }))
+          return next
         }
         function patch(index, changes) {
-          const next = characters.slice()
-          next[index] = Object.assign({}, characters[index], changes)
-          setCharacters(next)
+          const id = characters[index]?.id
+          setCharacters(current => current.map(person => person.id === id ? Object.assign({}, person, typeof changes === 'function' ? changes(person) : changes) : person))
         }
         function patchTraits(index, key, value) {
-          const character = characters[index]
-          patch(index, { traits: Object.assign({}, character.traits, { [key]: value }) })
+          patch(index, person => ({ traits: Object.assign({}, person.traits, { [key]: value }) }))
         }
         function patchOutfit(index, position, changes) {
-          const outfits = (characters[index].outfits || []).slice()
-          outfits[position] = Object.assign({}, outfits[position], changes)
-          patch(index, { outfits })
+          const outfitId = characters[index]?.outfits?.[position]?.id
+          patch(index, person => ({ outfits: (person.outfits || []).map(outfit => outfit.id === outfitId ? Object.assign({}, outfit, changes) : outfit) }))
         }
-        function commit(silent, overrideChars) {
-          if (!silent) { setNote('保存中…'); setSaveState('saving') }
-          // 刚 setCharacters 完数据还没进 data（React 的 setState 是异步的），
-          // 所以保存时必须显式带上这次要写的角色列表，否则会把旧数据写回去、新角色被覆盖。
-          const chars = Array.isArray(overrideChars) ? overrideChars : (data.definitions?.characters ?? [])
-          // 防清空：不允许把「本来有人物」的库写成空（曾经因此整库被清掉）
-          const beforeCount = (data.definitions?.characters ?? []).length
-          if (!chars.length && beforeCount > 0) {
-            reportHost('save-blocked', { before: beforeCount })
-            if (typeof showToast === 'function') showToast('拒绝保存：这会把 ' + beforeCount + ' 个角色清空。要清空请用「清空人物库」按钮', 'fail')
-            setNote('已阻止清空人物库（' + beforeCount + ' 个角色）')
-            setSaveState('')
-            return Promise.resolve()
-          }
-          reportHost('save-start', { characters: chars.length, outfits: (data.outfits ?? []).length, explicit: Array.isArray(overrideChars) })
-          // 服装库改的是顶层的 outfits，definitions 里那份是旧的 —— 保存前要先合并
-          const defs = Object.assign({}, data.definitions, {
-            characters: chars,
-            outfits: (data.outfits ?? data.definitions?.outfits ?? []),
-          })
-          return post('/definitions', { definitions: defs })
-            .then(r => {
-              reportHost('save-ok', { ok: Boolean(r?.ok) })
-              setData(r.state)
-              if (!silent) { setNote('人物库已保存'); setSaveState('saved') }
-              setTimeout(() => setSaveState(''), 2500)
-            })
-            .catch(e => {
+        function commit(silent) {
+          // 排队写入，并在真正开始时读取最新草稿；并行设计完成不会互相覆盖整库。
+          const pending = librarySaveQueue.current.then(async () => {
+            const current = dataRef.current
+            const revision = libraryRevision.current
+            const defs = Object.assign({}, current.definitions, { outfits: current.outfits ?? current.definitions?.outfits ?? [] })
+            setSaveState('saving')
+            if (!silent) setNote('保存中…')
+            reportHost('save-start', { characters: (defs.characters || []).length, outfits: defs.outfits.length })
+            try {
+              const r = await post('/definitions', { definitions: defs })
+              if (!r?.ok || !r.state) throw new Error(r?.error || '服务器没有确认保存')
+              reportHost('save-ok', { ok: true })
+              if (libraryRevision.current === revision) libraryDirty.current = false
+              receiveState(r.state)
+              libraryRevision.current += 1
+              setSaveState(libraryDirty.current ? '' : 'saved')
+              if (!silent) setNote(libraryDirty.current ? '已保存提交的内容；还有新修改，请再保存' : '人物库已保存')
+              return true
+            } catch (e) {
               const msg = e && e.message ? e.message : String(e)
               reportHost('save-failed', { message: msg.slice(0, 200) })
               if (typeof showToast === 'function') showToast('写入角色库失败：' + msg.slice(0, 60), 'fail')
               setNote('保存失败：' + msg)
               setSaveState('failed:' + msg.slice(0, 60))
-            })
+              return false
+            }
+          })
+          librarySaveQueue.current = pending.then(() => undefined, () => undefined)
+          return pending
+        }
+
+        function mergeDesign(original, designed, current) {
+          const next = Object.assign({}, current)
+          for (const key of ['name', 'match', 'note']) {
+            if (current[key] === original[key] && designed[key]) next[key] = designed[key]
+          }
+          next.traits = Object.assign({}, current.traits)
+          for (const [key, value] of Object.entries(designed.traits || {})) {
+            if (current.traits?.[key] === original.traits?.[key]) next.traits[key] = value
+          }
+          if ((designed.outfits || []).length && JSON.stringify(current.outfits) === JSON.stringify(original.outfits)) {
+            next.outfits = designed.outfits.map(outfit => Object.assign({ id: 'o' + Date.now() + Math.random().toString(36).slice(2, 6), enabled: true, default: false }, outfit))
+          }
+          return next
         }
 
         /** 让 agent 按「角色与服装设计规范」产出人物（可以顺带读当前卡片的设定）。 */
@@ -1981,19 +2088,21 @@ function versionsOf(jobId) {
           setDesignOpen(true)
           setDesignNote('')
           setDesignDone('')
-          setImproveTarget(-1)
+          setImproveTarget('')
           return
         }
 
         /** 直接改进某个角色：不开面板，拿当前这条输入框的要求跑一次改进 */
         async function sendImprove(index) {
-          const ask = String(improveDraft[index] || '').trim()
-          if (!ask) { setDesignNote('先写要改什么'); return }
-          // 不锁：生成完一个可以接着生成下一个（同一条防重复点）
           const person = characters[index]
           if (!person) return
-          if (improveInFlight.current[index]) return
-          improveInFlight.current[index] = true
+          const id = person.id
+          const draft = String(improveDraft[id] || '')
+          const ask = draft.trim()
+          if (!ask) { setDesignNote('先写要改什么'); return }
+          // 不锁：生成完一个可以接着生成下一个（同一条防重复点）
+          if (improveInFlight.current[id]) return
+          improveInFlight.current[id] = true
           setDesignBusy(true)
           setDesignNote('正在改进「' + (person.name || '未命名') + '」…')
           reportHost('improve-click', { index, name: String(person.name || ''), via: 'inline' })
@@ -2003,30 +2112,19 @@ function versionsOf(jobId) {
             if (!r?.ok) { setDesignNote('改进失败：' + (r?.error || '')); return }
             const people = r.people || []
             if (!people.length) { setDesignNote('没产出人物。模型原文：' + String(r.raw || '').slice(0, 140)); return }
-            const next = characters.slice()
-            const old = next[index]
-            const got = people[0]
-            next[index] = Object.assign({}, old, {
-              name: got.name || old.name,
-              match: got.match || old.match,
-              note: got.note || old.note,
-              traits: Object.assign({}, old.traits, got.traits || {}),
-              outfits: (got.outfits || []).length
-                ? got.outfits.map(o => Object.assign({ id: 'o' + Date.now() + Math.random().toString(36).slice(2, 6), enabled: true, default: false }, o))
-                : old.outfits,
-            })
-            setCharacters(next)
-            setImproveDraft(Object.assign({}, improveDraft, { [index]: '' }))
+            const current = dataRef.current?.definitions?.characters || []
+            if (!current.some(character => character.id === id)) { setDesignNote('角色已删除，已忽略改进结果'); return }
+            const next = setCharacters(current.map(character => character.id === id ? mergeDesign(person, people[0], character) : character))
+            setImproveDraft(drafts => drafts[id] === draft ? Object.assign({}, drafts, { [id]: '' }) : drafts)
             setDesignDone('')
-            commit(true, next).then(() => {
-              if (typeof showToast === 'function') showToast('已改进「' + next[index].name + '」，并写入角色库')
-            })
-            setDesignNote('')
+            const saved = await commit(true)
+            if (saved && typeof showToast === 'function') showToast('已改进「' + next.find(character => character.id === id).name + '」，并写入角色库')
+            setDesignNote(saved ? '' : '改进结果已保留，请点「保存人物库」重试保存')
           } catch (error) {
             setDesignNote('改进失败：' + (error?.message ?? error))
           } finally {
-            delete improveInFlight.current[index]
-            setDesignBusy(false)
+            delete improveInFlight.current[id]
+            setDesignBusy(Object.keys(improveInFlight.current).length > 0)
           }
         }
 
@@ -2049,42 +2147,39 @@ function versionsOf(jobId) {
             reader.readAsDataURL(file)
           }
           async function runDesign() {
-            // 不锁：可以连续生成
+            if (designInFlight.current) return
             const brief = String(designBrief || '').trim()
             if (!brief) { setDesignNote('先说说想要什么角色或服装'); return }
-            setDesignBusy(true)
+            const target = characters.find(character => character.id === improveTarget)
+            designInFlight.current = true
+            setDesignPanelBusy(true)
             setDesignNote('设计需要十几秒，请稍等…')
             try {
               const payload = { brief, sessionId: String(lastSessionId || '') }
-              reportHost('improve-run', { improveTarget, hasChar: Boolean(improveTarget >= 0 && characters[improveTarget]) })
-              if (improveTarget >= 0 && characters[improveTarget]) payload.current = characters[improveTarget]
+              reportHost('improve-run', { improveTarget, hasChar: Boolean(target) })
+              if (target) payload.current = target
               if (designPhoto) { payload.data = designPhoto; payload.mediaType = 'image/png'; payload.name = designName || 'ref.png' }
               const r = await post('/design', payload)
               if (!r?.ok) { setDesignNote('设计失败：' + (r?.error || '')); return }
               const people = r.people || []
               if (!people.length) { setDesignNote('没产出人物。模型原文：' + String(r.raw || '').slice(0, 160)); return }
-              const next = characters.slice()
+              const next = (dataRef.current?.definitions?.characters || []).slice()
               // 改进模式：原地替换那个角色；新建模式：追加
-              if (improveTarget >= 0 && improveTarget < next.length) {
-                const old = next[improveTarget]
-                const person = people[0]
-                next[improveTarget] = Object.assign({}, old, {
-                  name: person.name || old.name,
-                  match: person.match || old.match,
-                  note: person.note || old.note,
-                  traits: Object.assign({}, old.traits, person.traits || {}),
-                  outfits: (person.outfits || []).length
-                    ? person.outfits.map(o => Object.assign({ id: 'o' + Date.now() + Math.random().toString(36).slice(2, 6), enabled: true, default: false }, o))
-                    : old.outfits,
-                })
+              if (target) {
+                const index = next.findIndex(character => character.id === target.id)
+                if (index < 0) { setDesignNote('角色已删除，已忽略改进结果'); return }
+                next[index] = mergeDesign(target, people[0], next[index])
                 setCharacters(next)
                 setDesignDone('')
-                commit(true, next).then(() => {
-                  if (typeof showToast === 'function') showToast('已改进「' + next[improveTarget].name + '」，并写入角色库')
-                })
+                const saved = await commit(true)
+                if (saved && typeof showToast === 'function') showToast('已改进「' + next[index].name + '」，并写入角色库')
+                setDesignNote(saved ? '改进完成，已保存' : '改进结果已保留，请点「保存人物库」重试保存')
                 // 面板保持打开
-                setDesignBrief(''); setDesignPhoto(''); setDesignPreview(''); setDesignName('')
-                setImproveTarget(-1)
+                setDesignBrief(current => current === designBrief ? '' : current)
+                setDesignPhoto(current => current === designPhoto ? '' : current)
+                setDesignPreview(current => current === designPreview ? '' : current)
+                setDesignName(current => current === designName ? '' : current)
+                setImproveTarget(current => current === improveTarget ? '' : current)
                 return
               }
               for (const person of people) {
@@ -2098,22 +2193,26 @@ function versionsOf(jobId) {
               }
               setCharacters(next)
               setDesignDone('')
-              commit(true, next).then(() => {
-                if (typeof showToast === 'function') showToast('已生成 ' + people.length + ' 个角色，并写入角色库')
-              })
+              const saved = await commit(true)
+              if (saved && typeof showToast === 'function') showToast('已生成 ' + people.length + ' 个角色，并写入角色库')
+              setDesignNote(saved ? '已生成 ' + people.length + ' 位角色并保存' : '生成结果已保留，请点「保存人物库」重试保存')
               // 面板保持打开，让「保存人物库」提醒可见
-              setDesignBrief(''); setDesignPhoto(''); setDesignPreview(''); setDesignName('')
+              setDesignBrief(current => current === designBrief ? '' : current)
+              setDesignPhoto(current => current === designPhoto ? '' : current)
+              setDesignPreview(current => current === designPreview ? '' : current)
+              setDesignName(current => current === designName ? '' : current)
             } catch (error) {
               setDesignNote('失败：' + (error?.message ?? error))
             } finally {
-              setDesignBusy(false)
+              designInFlight.current = false
+              setDesignPanelBusy(false)
             }
           }
           const area = { width: '100%', minHeight: '96px', boxSizing: 'border-box', background: '#11141a', color: '#dbe3ee', border: '1px solid rgba(200,140,60,.55)', borderRadius: '12px', padding: '12px 14px', fontSize: '13px', lineHeight: '1.6', fontFamily: 'inherit', resize: 'vertical' }
           return h('div', { style: { margin: '10px 0 4px', padding: '16px', borderRadius: '12px', background: 'linear-gradient(180deg,#1b2029,#161a21)', border: '1px solid rgba(230,160,60,.4)' } },
             h('div', { style: { fontSize: '15px', fontWeight: 600, marginBottom: '4px' } },
-              improveTarget >= 0 && characters[improveTarget]
-                ? ('✏️ 改进「' + (characters[improveTarget].name || '未命名') + '」')
+              characters.find(character => character.id === improveTarget)
+                ? ('✏️ 改进「' + (characters.find(character => character.id === improveTarget).name || '未命名') + '」')
                 : '🎨 输入生成需求'),
             h('div', { style: { fontSize: '12px', color: '#9aa3b2', marginBottom: '10px' } }, '请描述您希望生成的角色或服装的具体需求'),
             h('textarea', { value: designBrief, placeholder: '例如：生成一个穿着古风汉服的少女角色，温柔可爱…', style: area, onChange: e => setDesignBrief(e.target.value) }),
@@ -2129,14 +2228,14 @@ function versionsOf(jobId) {
             ),
             designNote ? h('div', { style: { fontSize: '12px', color: /失败|太大|没产出/.test(designNote) ? '#f2686b' : '#9aa3b2', marginTop: '10px' } }, designNote) : null,
             h('div', { style: { display: 'flex', gap: '10px', marginTop: '14px' } },
-              h('button', { style: buttonStyle, onClick: () => { setDesignOpen(false); setDesignNote(''); setDesignDone(''); setImproveTarget(-1) } }, '取消'),
-              h('button', { style: Object.assign({}, buttonStyle, { borderColor: 'rgba(230,160,60,.7)', background: 'rgba(240,166,60,.15)', color: '#f0b45c' }), onClick: runDesign }, '确定生成'),
+              h('button', { style: buttonStyle, onClick: () => { setDesignOpen(false); setDesignNote(''); setDesignDone(''); setImproveTarget('') } }, '收起'),
+              h('button', { disabled: designPanelBusy, style: Object.assign({}, buttonStyle, { borderColor: 'rgba(230,160,60,.7)', background: 'rgba(240,166,60,.15)', color: '#f0b45c' }), onClick: runDesign }, designPanelBusy ? '正在生成…' : '确定生成'),
             ),
           )
         }
 
         /** 选一张本地图片，交给模型拆成各个可见块。 */
-        function pickPhoto() {
+        function pickPhoto(person) {
           const input = document.createElement('input')
           input.type = 'file'
           input.accept = 'image/png,image/jpeg,image/webp,image/gif'
@@ -2153,21 +2252,11 @@ function versionsOf(jobId) {
                   name: file.name,
                 })
                 if (!r.traits) { setNote('模型没按格式返回，原文：' + String(r.raw || '').slice(0, 200)); return }
-                const next = characters.slice()
-                const current = characters[photoTarget]
-                next[photoTarget] = Object.assign({}, current, {
-                  traits: Object.assign({}, current.traits, {
-                    feature: r.traits.feature || current.traits.feature,
-                    face: r.traits.face || current.traits.face,
-                    faceBack: r.traits.faceBack || current.traits.faceBack,
-                    bodySFW: r.traits.bodySFW || current.traits.bodySFW,
-                    lowerSFW: r.traits.fullSFW || r.traits.lowerSFW || current.traits.lowerSFW,
-                    bodyNSFW: r.traits.bodyNSFW || current.traits.bodyNSFW,
-                    lowerNSFW: r.traits.fullNSFW || r.traits.lowerNSFW || current.traits.lowerNSFW,
-                    negative: r.traits.negative || current.traits.negative,
-                  }),
-                })
-                setCharacters(next)
+                const current = dataRef.current?.definitions?.characters || []
+                if (!current.some(character => character.id === person.id)) { setNote('角色已删除，已忽略识图结果'); return }
+                const traits = Object.assign({}, r.traits, { lowerSFW: r.traits.fullSFW || r.traits.lowerSFW, lowerNSFW: r.traits.fullNSFW || r.traits.lowerNSFW })
+                for (const key of Object.keys(traits)) if (!traits[key]) delete traits[key]
+                setCharacters(current.map(character => character.id === person.id ? mergeDesign(person, { traits }, character) : character))
                 setNote('已按照片填好各块（' + (r.size || '') + '），核对一下再保存')
               } catch (e) {
                 setNote('看图失败：' + (e && e.message ? e.message : e))
@@ -2192,16 +2281,21 @@ function versionsOf(jobId) {
           const filled = ["feature","face","faceBack","bodySFW","bodySFWBack","lowerSFW","lowerSFWBack","bodyNSFW","bodyNSFWBack","lowerNSFW","lowerNSFWBack","negative"].filter(k => String(traits[k] || '').trim()).length
           const title = (c.name || '（未命名角色）') + '　' + filled + '/12 块　' + (outfits.length ? outfits.length + ' 套服装' : '没有服装')
           const grouped = (list) => list.map(([key, label, why, rows, folded]) => area(label, why, traits[key], v => patchTraits(i, key, v), rows))
-          return h('details', { key: c.id || i, style: { border: '1px solid #3a4150', borderRadius: '10px', padding: '10px 12px', margin: '8px 0' } },
-            h('summary', { style: { cursor: 'pointer', fontSize: '13px', fontWeight: 600 } }, title),
+          return h('details', { key: c.id, open: Boolean(peopleOpen[c.id]), onToggle: event => {
+            const open = event.currentTarget.open
+            setPeopleOpen(current => Boolean(current[c.id]) === open ? current : Object.assign({}, current, { [c.id]: open }))
+          }, style: { border: '1px solid #3a4150', borderRadius: '10px', padding: '10px 12px', margin: '8px 0' } },
+            h('summary', { style: { cursor: 'pointer', fontSize: '13px', fontWeight: 600 } },
+              h('label', { onClick: event => event.stopPropagation(), style: { marginRight: '10px', display: 'inline-flex', alignItems: 'center' } },
+                h('input', { type: 'checkbox', 'aria-label': '选择角色 ' + (c.name || '未命名'), checked: Boolean(peoplePicked[c.id]), onChange: event => { const checked = event.target.checked; setPeoplePicked(current => Object.assign({}, current, { [c.id]: checked })) } })), title),
             h('div', { style: S.row },
               h('input', { type: 'text', placeholder: '角色名', value: c.name || '', style: Object.assign({}, S.input, { width: '140px' }), onChange: e => patch(i, { name: e.target.value }) }),
               h('input', { type: 'text', placeholder: '英文名（逗号分隔，用来触发）', value: c.match || '', style: Object.assign({}, S.input, { flex: 1, minWidth: '180px' }), onChange: e => patch(i, { match: e.target.value }) }),
               h('label', { style: S.row }, h('input', { type: 'checkbox', checked: c.enabled !== false, onChange: e => patch(i, { enabled: e.target.checked }) }), h('span', { style: { fontSize: '12px' } }, '启用')),
-              h('button', { style: buttonStyle, onClick: () => { if (!confirm('删掉「' + (c.name || '未命名') + '」？')) return; const next = characters.slice(); next.splice(i, 1); setCharacters(next) } }, '删除角色'),
+              h('button', { style: buttonStyle, onClick: () => { if (!confirm('删掉「' + (c.name || '未命名') + '」？')) return; setCharacters(current => current.filter(character => character.id !== c.id)) } }, '删除角色'),
             ),
             h('div', { style: S.row },
-              h('button', { style: buttonStyle, onClick: () => { setPhotoTarget(i); pickPhoto() } }, '📷 从照片识别'),
+              h('button', { style: buttonStyle, onClick: () => pickPhoto(c) }, '📷 从照片识别'),
 
               h('button', { style: buttonStyle, onClick: designPeople }, '✨ 让 agent 设计角色'),
               h('span', { style: { fontSize: '12px', color: '#9aa3b2' } }, '照规范填各块'),
@@ -2212,12 +2306,12 @@ function versionsOf(jobId) {
               h('input', {
                 type: 'text',
                 placeholder: '要改什么？例如：头发改成银白 / 加一套睡衣 / 胸再大一点',
-                value: improveDraft[i] || '',
+                value: improveDraft[c.id] || '',
                 style: Object.assign({}, S.input, { flex: 1, minWidth: '220px' }),
-                onChange: e => setImproveDraft(Object.assign({}, improveDraft, { [i]: e.target.value })),
-                onKeyDown: e => { if (e.key === 'Enter' && (improveDraft[i] || '').trim()) sendImprove(i) },
+                onChange: e => { const value = e.target.value; setImproveDraft(current => Object.assign({}, current, { [c.id]: value })) },
+                onKeyDown: e => { if (e.key === 'Enter' && (improveDraft[c.id] || '').trim()) sendImprove(i) },
               }),
-              h('button', { style: buttonStyle, onClick: () => sendImprove(i) }, '✏️ 改进'),
+              h('button', { style: buttonStyle, disabled: designBusy && Boolean(improveInFlight.current[c.id]), onClick: () => sendImprove(i) }, improveInFlight.current[c.id] ? '正在改进…' : '✏️ 改进'),
             ),
             h('div', { style: { fontSize: '11px', color: '#6b7480', marginTop: '-4px' } }, '直接写要求点改进即可（回车也行），不用先打开面板'),
 
@@ -2226,8 +2320,8 @@ function versionsOf(jobId) {
               h('button', {
                 style: Object.assign({}, buttonStyle, { flex: 1, minWidth: '200px', textAlign: 'left' }),
                 onClick: async () => {
-                  const open = cardPickerFor === i
-                  setCardPickerFor(open ? -1 : i)
+                  const open = cardPickerFor === c.id
+                  setCardPickerFor(open ? -1 : c.id)
                   if (open) return
                   try {
                     const r = await jsonFetch(BASE + '/cards', { cache: 'no-store' })
@@ -2236,7 +2330,7 @@ function versionsOf(jobId) {
                 },
               }, (c.cards || []).length ? ('已绑定 ' + (c.cards || []).length + ' 张：' + (c.cards || []).map(p => String(p).replace(/^cards\//, '').replace(/\.json$/, '')).join('、').slice(0, 26) + '（点击修改）') : '点这里选择要绑定的卡片（不选 = 所有卡都能用）'),
             ),
-            cardPickerFor === i ? h('div', { style: { marginTop: '8px', padding: '10px 12px', borderRadius: '10px', background: 'rgba(255,255,255,.03)', border: '1px solid rgba(120,140,170,.2)' } },
+            cardPickerFor === c.id ? h('div', { style: { marginTop: '8px', padding: '10px 12px', borderRadius: '10px', background: 'rgba(255,255,255,.03)', border: '1px solid rgba(120,140,170,.2)' } },
               h('div', { style: { fontSize: '12px', color: '#9aa3b2', marginBottom: '8px' } }, '勾选要绑定的卡片（可多选）'),
               h('div', { style: { maxHeight: '220px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '4px' } },
                 cardList.length
@@ -2316,19 +2410,29 @@ function versionsOf(jobId) {
                 : saveState === 'saved' ? '💾 已保存到 definitions.json'
                 : saveState.startsWith('failed') ? ('❌ 保存失败：' + saveState.slice(7))
                 : ('✅ ' + designDone)),
-            h('button', { style: Object.assign({}, buttonStyle, { borderColor: 'rgba(240,166,60,.8)', background: 'linear-gradient(180deg,#f0a63c,#e0861f)', color: '#1a1206', fontWeight: 600, padding: '8px 22px', fontSize: '14px' }), onClick: () => { commit(true).then(() => setDesignDone('')) } }, '💾 保存人物库'),
+            h('button', { style: Object.assign({}, buttonStyle, { borderColor: 'rgba(240,166,60,.8)', background: 'linear-gradient(180deg,#f0a63c,#e0861f)', color: '#1a1206', fontWeight: 600, padding: '8px 22px', fontSize: '14px' }), onClick: () => { commit(true).then(saved => { if (saved) setDesignDone('') }) } }, '💾 保存人物库'),
             h('button', { style: Object.assign({}, buttonStyle, { fontSize: '12px' }), onClick: () => setDesignDone('') }, '知道了'),
           ) : null,
           h('div', { style: S.card },
             h('div', { style: { fontSize: '13px', marginBottom: '4px' } }, '人物设计（' + characters.length + ' 个角色）'),
             designPanel(),
             h('div', { style: { fontSize: '12px', color: '#9aa3b2', marginBottom: '8px' } }, '填了名字 + 五官 + 体态的角色，会作为「可用角色清单」交给规划模型；正文里出现这个名字时，这些内容会自动补齐，所以不会换脸。'),
+            h('div', { style: S.row },
+              h('button', { style: buttonStyle, onClick: () => setPeopleOpen(Object.fromEntries(characters.map(character => [character.id, false]))) }, '全部折叠'),
+              h('button', { style: buttonStyle, onClick: () => setPeopleOpen(Object.fromEntries(characters.map(character => [character.id, true]))) }, '全部展开'),
+              h('button', { style: buttonStyle, onClick: () => setPeoplePicked(Object.fromEntries(characters.map(character => [character.id, true]))) }, '全选角色'),
+              h('button', { style: buttonStyle, onClick: () => setPeoplePicked({}) }, '清除选择'),
+              h('button', { style: buttonStyle, onClick: () => setPeopleBatchOpen(current => !current) }, peopleBatchOpen ? '收起批量编辑' : '批量编辑'),
+              h('span', { style: { fontSize: '12px', color: '#9aa3b2' } }, '已选 ' + picked.length + ' / ' + characters.length + ' 位'),
+            ),
+            batchPanel(),
+            !designOpen && designNote ? h('div', { role: 'status', style: { fontSize: '12px', color: '#9aa3b2', marginBottom: '8px' } }, designNote) : null,
             characters.length ? null : h('div', { style: { fontSize: '12px', color: '#9aa3b2' } }, '还没有角色，点下面「新增角色」。'),
             characters.map(characterBlock),
             h('div', { style: S.row },
-              h('button', { style: buttonStyle, onClick: () => setCharacters(characters.concat([blankCharacter()])) }, '新增角色'),
-              h('button', { style: buttonStyle, onClick: commit }, '保存人物库'),
-              h('span', { style: { fontSize: '12px', color: '#9aa3b2' } }, '改完记得点保存'),
+              h('button', { style: buttonStyle, onClick: () => { const person = blankCharacter(); setCharacters(current => current.concat([person])); setPeopleOpen(current => Object.assign({}, current, { [person.id]: true })) } }, '新增角色'),
+              h('button', { style: buttonStyle, disabled: saveState === 'saving', onClick: () => commit(false) }, saveState === 'saving' ? '正在保存…' : '保存人物库'),
+              h('span', { role: 'status', style: { fontSize: '12px', color: saveState.startsWith('failed') ? '#f2686b' : '#9aa3b2' } }, saveState.startsWith('failed') ? '保存失败，请重试' : libraryDirty.current ? '有未保存修改' : saveState === 'saved' ? '人物库已保存' : '改完记得点保存'),
             ),
           ),
           h('div', { style: S.card },
@@ -2336,19 +2440,19 @@ function versionsOf(jobId) {
             h('div', { style: { fontSize: '12px', color: '#9aa3b2', marginBottom: '8px' } }, '这里放"办公室职业装""居家睡衣"这类通用套装；在角色那边勾上，他就能穿。'),
             (data.outfits || []).map((o, j) => h('div', { key: o.id || j, style: { borderTop: '1px solid #3a4150', marginTop: '8px', paddingTop: '6px' } },
               h('div', { style: S.row },
-                h('input', { type: 'text', placeholder: '套装名', value: o.name || '', style: Object.assign({}, S.input, { width: '190px' }), onChange: e => { const next = (data.outfits || []).slice(); next[j] = Object.assign({}, o, { name: e.target.value }); setData(Object.assign({}, data, { outfits: next })) } }),
-                h('label', { style: S.row }, h('input', { type: 'checkbox', checked: o.enabled !== false, onChange: e => { const next = (data.outfits || []).slice(); next[j] = Object.assign({}, o, { enabled: e.target.checked }); setData(Object.assign({}, data, { outfits: next })) } }), h('span', { style: { fontSize: '12px' } }, '启用')),
-                h('button', { style: buttonStyle, onClick: () => { const next = (data.outfits || []).slice(); next.splice(j, 1); setData(Object.assign({}, data, { outfits: next })) } }, '删除'),
+                h('input', { type: 'text', placeholder: '套装名', value: o.name || '', style: Object.assign({}, S.input, { width: '190px' }), onChange: e => { const next = (data.outfits || []).slice(); next[j] = Object.assign({}, o, { name: e.target.value }); setLibraryData(Object.assign({}, dataRef.current, { outfits: next })) } }),
+                h('label', { style: S.row }, h('input', { type: 'checkbox', checked: o.enabled !== false, onChange: e => { const next = (data.outfits || []).slice(); next[j] = Object.assign({}, o, { enabled: e.target.checked }); setLibraryData(Object.assign({}, dataRef.current, { outfits: next })) } }), h('span', { style: { fontSize: '12px' } }, '启用')),
+                h('button', { style: buttonStyle, onClick: () => { const next = (data.outfits || []).slice(); next.splice(j, 1); setLibraryData(Object.assign({}, dataRef.current, { outfits: next })) } }, '删除'),
               ),
               h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px', marginTop: '6px' } },
-                h('input', { type: 'text', placeholder: '上衣', value: o.upper || o.body || '', style: S.input, onChange: e => { const next = (data.outfits || []).slice(); next[j] = Object.assign({}, o, { upper: e.target.value }); setData(Object.assign({}, data, { outfits: next })) } }),
-                h('input', { type: 'text', placeholder: '下装', value: o.lower || '', style: S.input, onChange: e => { const next = (data.outfits || []).slice(); next[j] = Object.assign({}, o, { lower: e.target.value }); setData(Object.assign({}, data, { outfits: next })) } }),
-                h('input', { type: 'text', placeholder: '鞋袜', value: o.shoes || '', style: S.input, onChange: e => { const next = (data.outfits || []).slice(); next[j] = Object.assign({}, o, { shoes: e.target.value }); setData(Object.assign({}, data, { outfits: next })) } }),
-                h('input', { type: 'text', placeholder: '整体', value: o.full || '', style: S.input, onChange: e => { const next = (data.outfits || []).slice(); next[j] = Object.assign({}, o, { full: e.target.value }); setData(Object.assign({}, data, { outfits: next })) } }),
+                h('input', { type: 'text', placeholder: '上衣', value: o.upper || o.body || '', style: S.input, onChange: e => { const next = (data.outfits || []).slice(); next[j] = Object.assign({}, o, { upper: e.target.value }); setLibraryData(Object.assign({}, dataRef.current, { outfits: next })) } }),
+                h('input', { type: 'text', placeholder: '下装', value: o.lower || '', style: S.input, onChange: e => { const next = (data.outfits || []).slice(); next[j] = Object.assign({}, o, { lower: e.target.value }); setLibraryData(Object.assign({}, dataRef.current, { outfits: next })) } }),
+                h('input', { type: 'text', placeholder: '鞋袜', value: o.shoes || '', style: S.input, onChange: e => { const next = (data.outfits || []).slice(); next[j] = Object.assign({}, o, { shoes: e.target.value }); setLibraryData(Object.assign({}, dataRef.current, { outfits: next })) } }),
+                h('input', { type: 'text', placeholder: '整体', value: o.full || '', style: S.input, onChange: e => { const next = (data.outfits || []).slice(); next[j] = Object.assign({}, o, { full: e.target.value }); setLibraryData(Object.assign({}, dataRef.current, { outfits: next })) } }),
               ),
             )),
             h('div', { style: S.row },
-              h('button', { style: buttonStyle, onClick: () => setData(Object.assign({}, data, { outfits: (data.outfits || []).concat([{ id: 'of' + Date.now(), name: '新套装', upper: '', lower: '', shoes: '', accessory: '', full: '', back: '', negative: '', enabled: true }]) })) }, '新增套装'),
+              h('button', { style: buttonStyle, onClick: () => setLibraryData(Object.assign({}, dataRef.current, { outfits: (data.outfits || []).concat([{ id: 'of' + Date.now(), name: '新套装', upper: '', lower: '', shoes: '', accessory: '', full: '', back: '', negative: '', enabled: true }]) })) }, '新增套装'),
               h('button', { style: buttonStyle, onClick: () => commit() }, '保存服装库'),
             ),
           ),
@@ -2447,7 +2551,7 @@ function versionsOf(jobId) {
             setWfNote('✓ 已保存（' + (r.changed || []).join('、') + '）')
             if (typeof showToast === 'function') showToast('工作流参数已保存')
             const st2 = await jsonFetch(BASE + '/state', { cache: 'no-store' }).catch(() => null)
-            if (st2) setData(st2)
+            if (st2) receiveState(st2)
           } catch (e) { setWfNote('保存失败：' + (e?.message ?? e)) }
         }
 
@@ -2503,7 +2607,7 @@ function versionsOf(jobId) {
             setWfNote('✓ 已导入《' + r.name + '》节点 ' + r.nodes + ' 个，识别到：正面 ' + r.bindings.positive + ' / 负面 ' + r.bindings.negative + ' / 尺寸 ' + r.bindings.size + ' / 步数 ' + r.bindings.steps + ' / 底模 ' + r.bindings.model + ' / LoRA ' + r.bindings.loras)
             setWfImportOpen(false); setWfPaste('')
             const st = await jsonFetch(BASE + '/state', { cache: 'no-store' }).catch(() => null)
-            if (st) setData(st)
+            if (st) receiveState(st)
             if (typeof showToast === 'function') showToast('已导入工作流《' + r.name + '》，识别到 ' + r.bindings.loras + ' 个 LoRA')
           } catch (e) { setWfNote('导入失败：' + (e?.message ?? e)) }
         }
@@ -2529,7 +2633,7 @@ function versionsOf(jobId) {
               })())),
           h('div', { style: S.row },
             h('button', { style: buttonStyle, onClick: () => setWfImportOpen(v => !v) }, wfImportOpen ? '✖ 收起导入' : '📥 导入工作流'),
-            h('button', { style: buttonStyle, onClick: async () => { const r = await post('/reload', {}); if (r?.state) setData(r.state); setWfNote('已重新扫描') } }, '🔄 重新扫描'),
+            h('button', { style: buttonStyle, onClick: async () => { const r = await post('/reload', {}); if (r?.state) receiveState(r.state); setWfNote('已重新扫描') } }, '🔄 重新扫描'),
             h('button', { style: buttonStyle, onClick: loadLoraNames }, '🧩 读 ComfyUI 的 LoRA 列表'),
             h('label', { style: { display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: '#9aa3b2' } },
               h('input', { type: 'checkbox', checked: Boolean(config.lockWorkflow), onChange: e => save({ lockWorkflow: e.target.checked }) }),
@@ -2583,7 +2687,7 @@ function versionsOf(jobId) {
                       if (name === null) return
                       try {
                         const r = await post('/workflow', { id: wf.id, label: String(name).slice(0, 80) })
-                        if (r?.state) setData(r.state)
+                        if (r?.state) receiveState(r.state)
                         if (typeof showToast === 'function') showToast('已改名')
                       } catch (e) { if (typeof showToast === 'function') showToast('改名失败：' + (e?.message ?? e), 'fail') }
                     },
@@ -2595,7 +2699,7 @@ function versionsOf(jobId) {
                       if (!confirm('把《' + (wf.label || wf.id) + '》从列表移除？只移除条目，磁盘 JSON 不删。')) return
                       try {
                         const r = await post('/workflow', { id: wf.id, remove: true })
-                        if (r?.state) setData(r.state)
+                        if (r?.state) receiveState(r.state)
                         if (typeof showToast === 'function') showToast('已移除')
                       } catch (e) { if (typeof showToast === 'function') showToast('移除失败：' + (e?.message ?? e), 'fail') }
                     },
@@ -2717,7 +2821,7 @@ function versionsOf(jobId) {
 
         async function refreshWb() {
           const r = await jsonFetch(BASE + '/state', { cache: 'no-store' }).catch(() => null)
-          if (r) setData(r)
+          if (r) receiveState(r)
         }
         async function patchEntry(index, patch, remove, tip) {
           try {
@@ -3197,7 +3301,7 @@ function versionsOf(jobId) {
         tab === 'flow' ? flowTab() : null,
         tab === 'gallery' ? galleryTab() : null,
         tab === 'worldbook' ? worldbookTab() : null,
-        h('div', { style: { fontSize: '11px', color: '#6b7480', marginTop: '14px' } }, '配置存在插件的 config.json / definitions.json；这个页面的修改立即生效。'),
+        h('div', { style: { fontSize: '11px', color: '#6b7480', marginTop: '14px' } }, '人物与服装修改后请点「保存人物库」。'),
       )
     }
     // ─────────────────────────────────────────────────────────────
