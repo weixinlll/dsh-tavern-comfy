@@ -103,8 +103,8 @@ let openImageOverlay = null
       } catch { /* 报告本身绝不能影响功能 */ }
     }
     // 客户端版本戳：重启 DSH 后可以在 /state 的 clientReports 里确认加载的是哪一版
-    const CLIENT_BUILD = 'client-2026-10-08-character-batch'
-    reportHost('bundle-evaluated', { at: Date.now(), href: String(location?.href ?? '').slice(0, 120), build: CLIENT_BUILD, features: 'character-batch,fold-all,safe-design-save,single-caption' })
+    const CLIENT_BUILD = 'client-2026-10-08-character-picker-updater'
+    reportHost('bundle-evaluated', { at: Date.now(), href: String(location?.href ?? '').slice(0, 120), build: CLIENT_BUILD, features: 'character-picker,batch-select,safe-design-save,single-caption,plugin-update,system-option-colors' })
 
     try {
       window.addEventListener('error', event => {
@@ -1576,13 +1576,26 @@ function versionsOf(jobId) {
         setSaveState('')
       }
       const [tab, setTab] = React.useState('plan')
+      const [pluginUpdateLocal, setPluginUpdateLocal] = React.useState(null)
+      const [pluginUpdateCheck, setPluginUpdateCheck] = React.useState(null)
+      const [pluginUpdateNote, setPluginUpdateNote] = React.useState('')
+      const [pluginUpdatePending, setPluginUpdatePending] = React.useState('')
+      const pluginUpdateLocalAttempted = React.useRef(false)
+      const pluginUpdateLocalInFlight = React.useRef(false)
+      const pluginUpdatePendingRef = React.useRef('')
+      const pluginUpdateView = React.useRef(0)
+      const pluginUpdateTabRef = React.useRef(tab)
+      const pluginUpdateMounted = React.useRef(true)
+      pluginUpdateTabRef.current = tab
       const [note, setNote] = React.useState('')
       const [planText, setPlanText] = React.useState('')
       const [planRows, setPlanRows] = React.useState(null)
       // 哪一行正在展开"选择绑定卡片"（-1 = 都没展开）；内联展开，不用浮层
       const [cardPickerFor, setCardPickerFor] = React.useState(-1)
       const [cardList, setCardList] = React.useState([])
-      const [peopleOpen, setPeopleOpen] = React.useState({})
+      const [peopleSearch, setPeopleSearch] = React.useState('')
+      const [peopleActiveId, setPeopleActiveId] = React.useState('')
+      const [peopleEditorOpen, setPeopleEditorOpen] = React.useState(true)
       const [peoplePicked, setPeoplePicked] = React.useState({})
       const [peopleBatchOpen, setPeopleBatchOpen] = React.useState(false)
       const [peopleBatchField, setPeopleBatchField] = React.useState('feature')
@@ -1663,6 +1676,20 @@ function versionsOf(jobId) {
       React.useEffect(() => { loadProviders() }, [])
       // 等 /state 到位再测 ComfyUI：那时才拿得到 comfyUrl，也避开首次渲染的 config TDZ
       React.useEffect(() => { if (data) loadComfyStatus() }, [Boolean(data)])
+      React.useEffect(() => {
+        const view = ++pluginUpdateView.current
+        if (tab === 'plugin-update' && !pluginUpdateLocalAttempted.current) {
+          pluginUpdateLocalAttempted.current = true
+          void loadPluginUpdateLocal()
+        }
+        return () => {
+          if (pluginUpdateView.current === view) pluginUpdateView.current += 1
+        }
+      }, [tab])
+      React.useEffect(() => {
+        pluginUpdateMounted.current = true
+        return () => { pluginUpdateMounted.current = false; pluginUpdateView.current += 1 }
+      }, [])
       // 任务轮询：依赖写成 [] 并在内部读最新数据（原来依赖 data，
       // 每轮 refresh 都会让 effect 重建，慢的时候会叠起一堆请求）
       React.useEffect(() => {
@@ -1697,6 +1724,105 @@ function versionsOf(jobId) {
 
       function post(pathname, body) {
         return jsonFetch(BASE + pathname, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+      }
+      function mergePluginUpdateLocalStatus(status) {
+        setPluginUpdateLocal(current => {
+          const next = Object.assign({}, current, {
+            currentVersion: status?.currentVersion ?? current?.currentVersion,
+            restartRequired: status?.restartRequired ?? current?.restartRequired,
+          })
+          if (typeof status?.supported === 'boolean') {
+            next.supported = status.supported
+            next.reason = status.reason || ''
+          } else if (status?.reason) next.reason = status.reason
+          return next
+        })
+      }
+      async function loadPluginUpdateLocal() {
+        if (pluginUpdatePendingRef.current || pluginUpdateLocalInFlight.current) return
+        pluginUpdateLocalInFlight.current = true
+        pluginUpdatePendingRef.current = 'local'
+        setPluginUpdatePending('local')
+        setPluginUpdateNote('读取本地插件状态…')
+        const view = pluginUpdateView.current
+        try {
+          const status = await jsonFetch(BASE + '/plugin-update')
+          if (view !== pluginUpdateView.current || pluginUpdateTabRef.current !== 'plugin-update') return
+          setPluginUpdateLocal(status)
+          setPluginUpdateNote(status?.supported === false
+            ? (status.reason || '当前安装方式暂不支持自动更新。')
+            : status?.restartRequired ? '插件需要完整重启 DSH 后生效。' : '')
+        } catch (error) {
+          if (view !== pluginUpdateView.current || pluginUpdateTabRef.current !== 'plugin-update') return
+          setPluginUpdateNote('读取本地插件状态失败：' + (error?.message ?? error))
+        } finally {
+          pluginUpdateLocalInFlight.current = false
+          if (pluginUpdatePendingRef.current === 'local') {
+            pluginUpdatePendingRef.current = ''
+            if (pluginUpdateMounted.current) setPluginUpdatePending('')
+          }
+        }
+      }
+      async function checkPluginUpdate() {
+        if (pluginUpdatePendingRef.current || pluginUpdateLocal?.supported !== true) return
+        pluginUpdatePendingRef.current = 'check'
+        setPluginUpdatePending('check')
+        setPluginUpdateNote('正在检查插件更新…')
+        const view = pluginUpdateView.current
+        try {
+          const status = await post('/plugin-update/check', {})
+          if (view !== pluginUpdateView.current || pluginUpdateTabRef.current !== 'plugin-update') return
+          setPluginUpdateCheck(status)
+          mergePluginUpdateLocalStatus(status)
+          const supported = status?.supported ?? pluginUpdateLocal?.supported
+          const reason = status?.reason ?? (status?.supported === false ? '' : pluginUpdateLocal?.reason)
+          setPluginUpdateNote(status?.restartRequired
+            ? (status.message && status.message.includes('完整重启 DSH') ? status.message : [status.message, '插件已更新，需要完整重启 DSH 才会生效。'].filter(Boolean).join(' '))
+            : supported === false
+              ? (reason || '当前安装方式暂不支持自动更新。')
+              : reason
+                ? reason
+                : status?.available
+              ? (status?.canUpdate ? '发现可用更新。' : (status?.reason || '发现新版本，但当前无法自动更新。'))
+              : '当前已是最新版本。')
+        } catch (error) {
+          if (view !== pluginUpdateView.current || pluginUpdateTabRef.current !== 'plugin-update') return
+          setPluginUpdateNote('检查更新失败：' + (error?.message ?? error))
+        } finally {
+          if (pluginUpdatePendingRef.current === 'check') {
+            pluginUpdatePendingRef.current = ''
+            if (pluginUpdateMounted.current) setPluginUpdatePending('')
+          }
+        }
+      }
+      async function applyPluginUpdate() {
+        if (pluginUpdatePendingRef.current || !pluginUpdateLocal?.supported || !pluginUpdateCheck?.available || !pluginUpdateCheck?.canUpdate || pluginUpdateCheck?.restartRequired || pluginUpdateLocal?.restartRequired) return
+        if (libraryDirty.current) {
+          setPluginUpdateNote('请先保存人物库，再更新插件。')
+          return
+        }
+        pluginUpdatePendingRef.current = 'apply'
+        setPluginUpdatePending('apply')
+        setPluginUpdateNote('正在更新插件…')
+        const view = pluginUpdateView.current
+        try {
+          const status = await post('/plugin-update/apply', { target: pluginUpdateCheck.target })
+          if (!pluginUpdateMounted.current) return
+          const completedStatus = Object.assign({}, status, { restartRequired: true })
+          setPluginUpdateCheck(completedStatus)
+          mergePluginUpdateLocalStatus(completedStatus)
+          setPluginUpdateNote(status?.message && status.message.includes('完整重启 DSH')
+            ? status.message
+            : [status?.message, '插件更新完成，请完整重启 DSH 后生效。'].filter(Boolean).join(' '))
+        } catch (error) {
+          if (view !== pluginUpdateView.current || pluginUpdateTabRef.current !== 'plugin-update') return
+          setPluginUpdateNote('更新插件失败：' + (error?.message ?? error))
+        } finally {
+          if (pluginUpdatePendingRef.current === 'apply') {
+            pluginUpdatePendingRef.current = ''
+            if (pluginUpdateMounted.current) setPluginUpdatePending('')
+          }
+        }
       }
       async function save(patch) {
         setNote('保存中…')
@@ -1945,6 +2071,12 @@ function versionsOf(jobId) {
       function peopleTab() {
         const characters = (data.definitions && data.definitions.characters) || []
         const picked = characters.filter(character => peoplePicked[character.id])
+        const search = peopleSearch.trim().toLocaleLowerCase()
+        const filteredCharacters = (search
+          ? characters.filter(character => [character.name, character.match].some(value => String(value || '').toLocaleLowerCase().includes(search)))
+          : characters).slice().sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'zh-CN'))
+        const activeCharacter = filteredCharacters.find(character => character.id === peopleActiveId) || filteredCharacters[0] || null
+        const activeIndex = activeCharacter ? characters.findIndex(character => character.id === activeCharacter.id) : -1
         const batchFields = [
           ['feature', '角色特征'], ['face', '五官外貌'], ['faceBack', '五官外貌背面'],
           ['bodySFW', '上半身SFW'], ['bodySFWBack', '上半身SFW背面'], ['lowerSFW', '下半身SFW'], ['lowerSFWBack', '下半身SFW背面'],
@@ -1977,6 +2109,16 @@ function versionsOf(jobId) {
         function batchPanel() {
           if (!peopleBatchOpen) return null
           return h('div', { style: Object.assign({}, S.card, { margin: '8px 0 12px', background: 'rgba(106,168,255,.04)' }) },
+            h('div', { style: { fontSize: '12px', color: '#9aa3b2', marginBottom: '6px' } }, '选择要批量修改的角色（列表按上方搜索筛选；已选 ' + picked.length + ' 位，包含隐藏角色）'),
+            h('div', { style: S.row },
+              h('button', { style: buttonStyle, disabled: !filteredCharacters.length, onClick: () => setPeoplePicked(current => Object.assign({}, current, Object.fromEntries(filteredCharacters.map(character => [character.id, true])))) }, '全选当前筛选'),
+              h('button', { style: buttonStyle, onClick: () => setPeoplePicked({}) }, '清除选择'),
+            ),
+            h('div', { style: { maxHeight: '150px', overflowY: 'auto', display: 'flex', flexWrap: 'wrap', gap: '4px 12px', marginBottom: '10px' } },
+              filteredCharacters.length ? filteredCharacters.map(character => h('label', { key: character.id, style: { display: 'inline-flex', alignItems: 'center', gap: '5px', fontSize: '12px' } },
+                h('input', { type: 'checkbox', 'aria-label': '批量选择角色 ' + (character.name || '未命名'), checked: Boolean(peoplePicked[character.id]), onChange: event => { const checked = event.target.checked; setPeoplePicked(current => Object.assign({}, current, { [character.id]: checked })) } }),
+                character.name || '（未命名角色）',
+              )) : h('span', { style: { fontSize: '12px', color: '#9aa3b2' } }, '没有匹配的角色')),
             h('div', { style: S.row },
               h('span', { style: S.label }, '批量编辑'),
               h('select', { 'aria-label': '批量编辑字段', value: peopleBatchField, style: S.input, onChange: async event => {
@@ -2014,6 +2156,39 @@ function versionsOf(jobId) {
           for (const key of ["feature","face","faceBack","bodySFW","bodySFWBack","lowerSFW","lowerSFWBack","bodyNSFW","bodyNSFWBack","lowerNSFW","lowerNSFWBack","negative"]) traits[key] = ''
           return { id: 'c' + Date.now() + Math.random().toString(36).slice(2, 6), name: '', match: '', enabled: true, continuity: '', note: '', inject: {}, cards: [], outfitRefs: [], traits,
             outfits: [{ id: 'o' + Date.now(), name: '常服', upper: '', lower: '', shoes: '', accessory: '', full: '', back: '', negative: '', enabled: true, default: true }] }
+        }
+        function addCharacter() {
+          const person = blankCharacter()
+          setCharacters(current => current.concat([person]))
+          setPeopleSearch('')
+          setPeopleActiveId(person.id)
+          setPeopleEditorOpen(true)
+        }
+        function copyCharacter(person) {
+          if (!person) return
+          const copy = Object.assign({}, person, {
+            id: 'c' + Date.now() + Math.random().toString(36).slice(2, 8),
+            name: (person.name || '未命名角色') + '（副本）',
+            traits: Object.assign({}, person.traits),
+            inject: Object.assign({}, person.inject),
+            cards: (person.cards || []).slice(),
+            outfitRefs: (person.outfitRefs || []).slice(),
+            outfits: (person.outfits || []).map(outfit => Object.assign({}, outfit, { id: 'o' + Date.now() + Math.random().toString(36).slice(2, 8) })),
+          })
+          setCharacters(current => current.concat([copy]))
+          setPeopleSearch('')
+          setPeopleActiveId(copy.id)
+          setPeopleEditorOpen(true)
+        }
+        function patchIdentity(index, changes) {
+          const person = characters[index]
+          if (!person) return
+          const next = Object.assign({}, person, changes)
+          const query = peopleSearch.trim().toLocaleLowerCase()
+          const stillMatches = [next.name, next.match].some(value => String(value || '').toLocaleLowerCase().includes(query))
+          setPeopleActiveId(person.id)
+          if (query && !stillMatches) setPeopleSearch('')
+          patch(index, changes)
         }
         // 注意：peopleTab 是被调用的普通函数，不能用 hooks（会让 SettingsPanel 的 hooks 数不稳定）
         onDesignResult = () => { refresh() }
@@ -2192,6 +2367,9 @@ function versionsOf(jobId) {
                 })
               }
               setCharacters(next)
+              setPeopleSearch('')
+              setPeopleActiveId(next[next.length - people.length]?.id || '')
+              setPeopleEditorOpen(true)
               setDesignDone('')
               const saved = await commit(true)
               if (saved && typeof showToast === 'function') showToast('已生成 ' + people.length + ' 个角色，并写入角色库')
@@ -2281,24 +2459,16 @@ function versionsOf(jobId) {
           const filled = ["feature","face","faceBack","bodySFW","bodySFWBack","lowerSFW","lowerSFWBack","bodyNSFW","bodyNSFWBack","lowerNSFW","lowerNSFWBack","negative"].filter(k => String(traits[k] || '').trim()).length
           const title = (c.name || '（未命名角色）') + '　' + filled + '/12 块　' + (outfits.length ? outfits.length + ' 套服装' : '没有服装')
           const grouped = (list) => list.map(([key, label, why, rows, folded]) => area(label, why, traits[key], v => patchTraits(i, key, v), rows))
-          return h('details', { key: c.id, open: Boolean(peopleOpen[c.id]), onToggle: event => {
+          return h('details', { key: c.id, open: peopleEditorOpen, onToggle: event => {
             const open = event.currentTarget.open
-            setPeopleOpen(current => Boolean(current[c.id]) === open ? current : Object.assign({}, current, { [c.id]: open }))
+            setPeopleEditorOpen(current => current === open ? current : open)
           }, style: { border: '1px solid #3a4150', borderRadius: '10px', padding: '10px 12px', margin: '8px 0' } },
-            h('summary', { style: { cursor: 'pointer', fontSize: '13px', fontWeight: 600 } },
-              h('label', { onClick: event => event.stopPropagation(), style: { marginRight: '10px', display: 'inline-flex', alignItems: 'center' } },
-                h('input', { type: 'checkbox', 'aria-label': '选择角色 ' + (c.name || '未命名'), checked: Boolean(peoplePicked[c.id]), onChange: event => { const checked = event.target.checked; setPeoplePicked(current => Object.assign({}, current, { [c.id]: checked })) } })), title),
+            h('summary', { style: { cursor: 'pointer', fontSize: '13px', fontWeight: 600 } }, title),
             h('div', { style: S.row },
-              h('input', { type: 'text', placeholder: '角色名', value: c.name || '', style: Object.assign({}, S.input, { width: '140px' }), onChange: e => patch(i, { name: e.target.value }) }),
-              h('input', { type: 'text', placeholder: '英文名（逗号分隔，用来触发）', value: c.match || '', style: Object.assign({}, S.input, { flex: 1, minWidth: '180px' }), onChange: e => patch(i, { match: e.target.value }) }),
+              h('input', { type: 'text', placeholder: '角色名', value: c.name || '', style: Object.assign({}, S.input, { width: '140px' }), onChange: e => patchIdentity(i, { name: e.target.value }) }),
+              h('input', { type: 'text', placeholder: '英文名（逗号分隔，用来触发）', value: c.match || '', style: Object.assign({}, S.input, { flex: 1, minWidth: '180px' }), onChange: e => patchIdentity(i, { match: e.target.value }) }),
               h('label', { style: S.row }, h('input', { type: 'checkbox', checked: c.enabled !== false, onChange: e => patch(i, { enabled: e.target.checked }) }), h('span', { style: { fontSize: '12px' } }, '启用')),
               h('button', { style: buttonStyle, onClick: () => { if (!confirm('删掉「' + (c.name || '未命名') + '」？')) return; setCharacters(current => current.filter(character => character.id !== c.id)) } }, '删除角色'),
-            ),
-            h('div', { style: S.row },
-              h('button', { style: buttonStyle, onClick: () => pickPhoto(c) }, '📷 从照片识别'),
-
-              h('button', { style: buttonStyle, onClick: designPeople }, '✨ 让 agent 设计角色'),
-              h('span', { style: { fontSize: '12px', color: '#9aa3b2' } }, '照规范填各块'),
             ),
             // 常驻的改进行：直接写要求 → 点改进，不用先展开面板
             h('div', { style: S.row },
@@ -2412,28 +2582,35 @@ function versionsOf(jobId) {
                 : ('✅ ' + designDone)),
             h('button', { style: Object.assign({}, buttonStyle, { borderColor: 'rgba(240,166,60,.8)', background: 'linear-gradient(180deg,#f0a63c,#e0861f)', color: '#1a1206', fontWeight: 600, padding: '8px 22px', fontSize: '14px' }), onClick: () => { commit(true).then(saved => { if (saved) setDesignDone('') }) } }, '💾 保存人物库'),
             h('button', { style: Object.assign({}, buttonStyle, { fontSize: '12px' }), onClick: () => setDesignDone('') }, '知道了'),
-          ) : null,
+        ) : null,
           h('div', { style: S.card },
             h('div', { style: { fontSize: '13px', marginBottom: '4px' } }, '人物设计（' + characters.length + ' 个角色）'),
-            designPanel(),
             h('div', { style: { fontSize: '12px', color: '#9aa3b2', marginBottom: '8px' } }, '填了名字 + 五官 + 体态的角色，会作为「可用角色清单」交给规划模型；正文里出现这个名字时，这些内容会自动补齐，所以不会换脸。'),
-            h('div', { style: S.row },
-              h('button', { style: buttonStyle, onClick: () => setPeopleOpen(Object.fromEntries(characters.map(character => [character.id, false]))) }, '全部折叠'),
-              h('button', { style: buttonStyle, onClick: () => setPeopleOpen(Object.fromEntries(characters.map(character => [character.id, true]))) }, '全部展开'),
-              h('button', { style: buttonStyle, onClick: () => setPeoplePicked(Object.fromEntries(characters.map(character => [character.id, true]))) }, '全选角色'),
-              h('button', { style: buttonStyle, onClick: () => setPeoplePicked({}) }, '清除选择'),
-              h('button', { style: buttonStyle, onClick: () => setPeopleBatchOpen(current => !current) }, peopleBatchOpen ? '收起批量编辑' : '批量编辑'),
-              h('span', { style: { fontSize: '12px', color: '#9aa3b2' } }, '已选 ' + picked.length + ' / ' + characters.length + ' 位'),
+          h('div', { style: Object.assign({}, S.row, { alignItems: 'stretch' }) },
+            h('input', { type: 'search', 'aria-label': '搜索角色', value: peopleSearch, placeholder: '搜索中文名或英文触发名', style: Object.assign({}, S.input, { flex: '1 1 220px', minWidth: '180px' }), onChange: event => setPeopleSearch(event.target.value) }),
+            h('select', { 'aria-label': '当前角色', value: activeCharacter?.id || '', style: Object.assign({}, S.input, { flex: '1 1 220px', minWidth: '180px' }), onChange: event => { setPeopleActiveId(event.target.value); setPeopleEditorOpen(true) } },
+              activeCharacter ? filteredCharacters.map(character => h('option', { key: character.id, value: character.id, style: { color: 'CanvasText', backgroundColor: 'Canvas' } }, (character.name || '（未命名角色）') + (character.match ? ' · ' + character.match : ''))) : h('option', { value: '', style: { color: 'CanvasText', backgroundColor: 'Canvas' } }, '没有匹配的角色'),
             ),
-            batchPanel(),
-            !designOpen && designNote ? h('div', { role: 'status', style: { fontSize: '12px', color: '#9aa3b2', marginBottom: '8px' } }, designNote) : null,
-            characters.length ? null : h('div', { style: { fontSize: '12px', color: '#9aa3b2' } }, '还没有角色，点下面「新增角色」。'),
-            characters.map(characterBlock),
-            h('div', { style: S.row },
-              h('button', { style: buttonStyle, onClick: () => { const person = blankCharacter(); setCharacters(current => current.concat([person])); setPeopleOpen(current => Object.assign({}, current, { [person.id]: true })) } }, '新增角色'),
-              h('button', { style: buttonStyle, disabled: saveState === 'saving', onClick: () => commit(false) }, saveState === 'saving' ? '正在保存…' : '保存人物库'),
-              h('span', { role: 'status', style: { fontSize: '12px', color: saveState.startsWith('failed') ? '#f2686b' : '#9aa3b2' } }, saveState.startsWith('failed') ? '保存失败，请重试' : libraryDirty.current ? '有未保存修改' : saveState === 'saved' ? '人物库已保存' : '改完记得点保存'),
-            ),
+            h('button', { style: buttonStyle, onClick: () => setPeopleEditorOpen(open => !open) }, peopleEditorOpen ? '收起编辑' : '展开编辑'),
+          ),
+          h('div', { style: Object.assign({}, S.row, { marginTop: '8px' }) },
+            h('button', { style: buttonStyle, onClick: addCharacter }, '新增角色'),
+            h('button', { style: buttonStyle, disabled: !activeCharacter, onClick: () => copyCharacter(activeCharacter) }, '复制当前角色'),
+            h('button', { style: buttonStyle, disabled: !activeCharacter, onClick: () => activeCharacter && pickPhoto(activeCharacter) }, '从照片识别'),
+            h('button', { style: buttonStyle, onClick: designPeople }, '让 agent 设计角色'),
+            h('button', { style: buttonStyle, disabled: saveState === 'saving', onClick: () => commit(false) }, saveState === 'saving' ? '正在保存…' : '保存人物库'),
+            h('button', { style: buttonStyle, onClick: () => setPeopleBatchOpen(current => !current) }, peopleBatchOpen ? '收起批量编辑' : '批量编辑'),
+            h('span', { style: { fontSize: '12px', color: '#9aa3b2' } }, '已选 ' + picked.length + ' / ' + characters.length + ' 位'),
+          ),
+          designPanel(),
+          batchPanel(),
+          !designOpen && designNote ? h('div', { role: 'status', style: { fontSize: '12px', color: '#9aa3b2', marginBottom: '8px' } }, designNote) : null,
+          characters.length && !activeCharacter ? h('div', { role: 'status', style: { fontSize: '12px', color: '#9aa3b2', padding: '10px 0' } }, '没有匹配的角色，请调整搜索词。') : null,
+          !characters.length ? h('div', { style: { fontSize: '12px', color: '#9aa3b2' } }, '还没有角色，点上方「新增角色」。') : null,
+          activeCharacter ? characterBlock(activeCharacter, activeIndex) : null,
+          h('div', { style: S.row },
+            h('span', { role: 'status', style: { fontSize: '12px', color: saveState.startsWith('failed') ? '#f2686b' : '#9aa3b2' } }, saveState.startsWith('failed') ? '保存失败，请重试' : libraryDirty.current ? '有未保存修改' : saveState === 'saved' ? '人物库已保存' : '改完记得点保存'),
+          ),
           ),
           h('div', { style: S.card },
             h('div', { style: { fontSize: '13px', marginBottom: '4px' } }, '通用服装库（可跨角色复用）'),
@@ -3289,7 +3466,35 @@ function versionsOf(jobId) {
         )
       }
 
-      const tabs = [['plan', '生图规划'], ['people', '人物库'], ['gallery', '历史图'], ['worldbook', '世界书'], ['flow', '画风']]
+      function pluginUpdateTab() {
+        const supported = pluginUpdateLocal?.supported === true
+        const version = value => value ? String(value) : '暂无结果'
+        const restartNeeded = pluginUpdateCheck?.restartRequired === true || pluginUpdateLocal?.restartRequired === true
+        const canUpdate = supported && pluginUpdateCheck?.available === true && pluginUpdateCheck?.canUpdate === true && !restartNeeded
+        const latestConfirmed = pluginUpdateCheck?.available === false && pluginUpdateCheck?.restartRequired !== true && pluginUpdateCheck?.supported !== false && pluginUpdateLocal?.supported !== false && !pluginUpdateCheck?.reason && !pluginUpdateLocal?.reason
+        return h('div', null,
+          h('div', { style: S.card },
+            h('div', { style: { fontSize: '14px', fontWeight: 600, marginBottom: '8px' } }, '插件更新'),
+            h('div', { style: { display: 'grid', gridTemplateColumns: 'minmax(120px, auto) 1fr', gap: '6px 12px', fontSize: '13px' } },
+              h('span', { style: S.label }, '当前版本'), h('span', null, version(pluginUpdateLocal?.currentVersion)),
+              h('span', { style: S.label }, '远端版本'), h('span', null, version(pluginUpdateCheck?.latestVersion)),
+            ),
+            latestConfirmed ? h('div', { style: { fontSize: '12px', color: '#9aa3b2', marginTop: '8px' } }, '当前已是最新版本。') : null,
+            pluginUpdateLocal?.supported === false ? h('a', { href: 'https://github.com/weixinlll/dsh-tavern-comfy', target: '_blank', rel: 'noopener noreferrer', style: { display: 'inline-block', marginTop: '8px', color: '#8bb8ff' } }, '打开插件 GitHub 页面手动下载') : null,
+            h('div', { style: S.row },
+              h('button', { style: buttonStyle, disabled: !supported || Boolean(pluginUpdatePending), onClick: () => { setPluginUpdateCheck(null); void checkPluginUpdate() } }, pluginUpdatePending === 'check' ? '正在检查…' : '检查更新'),
+              h('button', { style: buttonStyle, disabled: !canUpdate || Boolean(pluginUpdatePending), onClick: applyPluginUpdate }, pluginUpdatePending === 'apply' ? '正在更新…' : '更新插件'),
+              !pluginUpdateLocal && pluginUpdatePending !== 'local' ? h('button', { style: buttonStyle, disabled: Boolean(pluginUpdatePending), onClick: () => { pluginUpdateLocalAttempted.current = true; void loadPluginUpdateLocal() } }, '重试读取本地状态') : null,
+            ),
+            h('div', { role: 'status', 'aria-live': 'polite', style: { minHeight: '18px', fontSize: '12px', color: restartNeeded ? '#f0b45c' : '#9aa3b2', marginTop: '8px' } },
+              pluginUpdateNote || (pluginUpdatePending === 'local' ? '读取本地插件状态…' : ''),
+            ),
+            h('div', { style: { fontSize: '12px', color: '#9aa3b2', marginTop: '8px', lineHeight: 1.55 } }, '只更新插件代码；配置和人物库会保留。更新完成后请完整重启 DSH 才会生效。'),
+          ),
+        )
+      }
+
+      const tabs = [['plan', '生图规划'], ['people', '人物库'], ['gallery', '历史图'], ['worldbook', '世界书'], ['flow', '画风'], ['plugin-update', '插件更新']]
       return h('div', { style: { padding: '4px 2px 20px', fontSize: '13px' } },
         h(SetupGuide),
         head,
@@ -3301,6 +3506,7 @@ function versionsOf(jobId) {
         tab === 'flow' ? flowTab() : null,
         tab === 'gallery' ? galleryTab() : null,
         tab === 'worldbook' ? worldbookTab() : null,
+        tab === 'plugin-update' ? pluginUpdateTab() : null,
         h('div', { style: { fontSize: '11px', color: '#6b7480', marginTop: '14px' } }, '人物与服装修改后请点「保存人物库」。'),
       )
     }

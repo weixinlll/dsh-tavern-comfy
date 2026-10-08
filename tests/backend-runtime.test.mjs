@@ -16,7 +16,7 @@ function deferred() { let resolve; const promise = new Promise(r => { resolve = 
 async function runtime(t, stream, definitions = {}) {
   const root = await mkdtemp(join(tmpdir(), 'dsh-comfy-test-'))
   await mkdir(join(root, 'lib')); await mkdir(join(root, 'workflows'))
-  for (const name of ['index.js', 'planner.js', 'prompts.js', 'tavern-bridge.js']) await copyFile(join(source, 'lib', name), join(root, 'lib', name))
+  for (const name of ['index.js', 'planner.js', 'prompts.js', 'tavern-bridge.js', 'updater.js']) await copyFile(join(source, 'lib', name), join(root, 'lib', name))
   await writeFile(join(root, 'package.json'), JSON.stringify({ type: 'module' }))
   await writeFile(join(root, 'worldbook.json'), JSON.stringify({ name: 'test', entries: [] }))
   await writeFile(join(root, 'definitions.json'), JSON.stringify(definitions))
@@ -57,10 +57,10 @@ async function runtime(t, stream, definitions = {}) {
     assert.ok(basename(root).startsWith('dsh-comfy-test-'))
     await rm(root, { recursive: true, force: true })
   })
-  function request(path, body, method = 'POST') {
+  function request(path, body, method = 'POST', headers = {}) {
     return new Promise((resolve, reject) => {
       const req = Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))])
-      Object.assign(req, { method, url: '/plugins/dsh-tavern-comfy/' + path, headers: { host: 'localhost' } })
+      Object.assign(req, { method, url: '/plugins/dsh-tavern-comfy/' + path, headers: { host: 'localhost', 'content-type': 'application/json', ...headers } })
       const response = {
         headersSent: false,
         writeHead(status) { this.status = status; this.headersSent = true },
@@ -144,4 +144,16 @@ test('definitions route preserves omitted clothing/settings/props and retains ex
   const refused = await f.request('definitions', { definitions: { characters: [] } })
   assert.equal(refused.body.ok, false)
   assert.equal(refused.body.refused, 'would-empty-characters')
+})
+
+test('plugin update routes enforce methods and reject cross-origin or non-JSON installation', async t => {
+  const f = await runtime(t, async function* () {})
+  assert.equal((await f.request('plugin-update', {}, 'POST')).status, 405)
+  assert.equal((await f.request('plugin-update/apply', undefined, 'GET')).status, 405)
+  assert.equal((await f.request('plugin-update/apply', {}, 'POST', { origin: 'https://example.invalid' })).status, 403)
+  assert.equal((await f.request('plugin-update/apply', {}, 'POST', { 'content-type': 'text/plain' })).status, 403)
+  const status = await f.request('plugin-update', undefined, 'GET')
+  assert.equal(status.status, 200); assert.equal(status.body.supported, false)
+  const update = await f.request('plugin-update/apply', { target: 'a'.repeat(40) })
+  assert.equal(update.status, 400); assert.match(update.body.error, /先检查更新/)
 })
