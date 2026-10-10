@@ -53,7 +53,7 @@ async function runtime(t, stream, definitions = {}, options = {}) {
     inject(names, install) { if (names.every(name => this[name])) install(this) },
     effect(install) { const off = install(); if (typeof off === 'function') disposes.push(off); return off },
   }
-  const { apply } = await import(pathToFileURL(join(root, 'lib', 'index.js')).href)
+  const { apply, name } = await import(pathToFileURL(join(root, 'lib', 'index.js')).href)
   apply(ctx, { plannerProvider: 'mock', plannerModel: 'mock', plannerCount: 2, ...options.config })
   if (options.tavern) {
     for (let i = 0; i < 100 && !options.tavern.bridgeReady; i++) await delay(5)
@@ -68,10 +68,10 @@ async function runtime(t, stream, definitions = {}, options = {}) {
     assert.ok(basename(root).startsWith('dsh-comfy-test-'))
     await rm(root, { recursive: true, force: true })
   })
-  function request(path, body, method = 'POST', headers = {}) {
+  function request(path, body, method = 'POST', headers = {}, basePath = '/plugins/dsh-tavern-image') {
     return new Promise((resolve, reject) => {
       const req = Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))])
-      Object.assign(req, { method, url: '/plugins/dsh-tavern-comfy/' + path, headers: { host: 'localhost', 'content-type': 'application/json', ...headers } })
+      Object.assign(req, { method, url: basePath + '/' + path, headers: { host: 'localhost', 'content-type': 'application/json', ...headers } })
       const response = {
         headersSent: false,
         writeHead(status) { this.status = status; this.headersSent = true },
@@ -80,7 +80,7 @@ async function runtime(t, stream, definitions = {}, options = {}) {
       routes.get(req.url.split('?')[0])(req, response)
     })
   }
-  return { request, events, submitted, firstPrompt, root }
+  return { request, events, submitted, firstPrompt, root, pluginName: name }
 }
 
 test('host starts the first complete image while the planner stream is still open; duplicate/extra blocks stay capped', async t => {
@@ -110,6 +110,15 @@ test('host starts the first complete image while the planner stream is still ope
   const jobs = Object.values(JSON.parse(await readFile(join(f.root, 'jobs-store.json'), 'utf8')))
   assert.equal(jobs.length, 2)
   assert.ok(jobs.every(job => job.workflowId === 'test' && job.outputNode === '2' && job.comfyId?.startsWith('comfy-')))
+})
+
+test('new API paths are canonical while old paths remain available for existing clients', async t => {
+  const f = await runtime(t, async function* () {})
+  const current = await f.request('state', undefined, 'GET')
+  const legacy = await f.request('state', undefined, 'GET', {}, '/plugins/dsh-tavern-comfy')
+  assert.equal(f.pluginName, 'dsh-tavern-image')
+  assert.equal(current.status, 200)
+  assert.equal(legacy.status, 200)
 })
 
 test('a stream error preserves complete submitted images, marks the plan failed, and allows retry without duplicate GPU jobs', async t => {

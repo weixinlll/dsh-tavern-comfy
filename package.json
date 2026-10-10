@@ -1,7 +1,7 @@
 {
   "name": "dsh-tavern-comfy",
-  "version": "2.0.0",
-  "description": "DSH Tavern 多平台场景生图：ComfyUI、NovelAI、OpenAI 及兼容渠道，后台配图、人物库与工作流可视化编辑。",
+  "version": "2.1.0",
+  "description": "DSH Tavern 剧情配图插件，支持 ComfyUI、NovelAI、OpenAI Images、Gemini 等渠道。",
   "type": "module",
   "scripts": {
     "test": "node --test"

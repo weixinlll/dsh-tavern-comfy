@@ -182,12 +182,22 @@ test('提示词预设编辑草稿保存在本地并在重新打开控制台后�
   first.find(node => node.type === 'button' && first.text(node) === '画风').props.onClick(); first.render()
   const input = first.find(node => node.type === 'textarea' && node.props['aria-label'] === '预设正面指导 我的预设')
   input.props.onChange({ target: { value: 'soft light, careful composition' } }); first.render()
-  assert.match(first.storage.get('dsh-tavern-comfy-prompt-draft-v1'), /careful composition/)
+  assert.match(first.storage.get('dsh-tavern-image-prompt-draft-v1'), /careful composition/)
 
   const reopened = harness(state, null, undefined, first.storage)
   await reopened.ready()
   reopened.find(node => node.type === 'button' && reopened.text(node) === '画风').props.onClick(); reopened.render()
   assert.equal(reopened.find(node => node.type === 'textarea' && node.props['aria-label'] === '预设正面指导 我的预设').props.value, 'soft light, careful composition')
+})
+
+test('改名后仍读取旧版提示词草稿', async () => {
+  const state = externalState()
+  state.config.promptPresets = [{ id: 'draft-1', name: '我的预设', positive: 'saved value', negative: '', enabled: true }]
+  const storage = new Map([['dsh-tavern-comfy-prompt-draft-v1', JSON.stringify([{ ...state.config.promptPresets[0], positive: 'legacy draft' }])]])
+  const ui = harness(state, null, undefined, storage)
+  await ui.ready()
+  ui.find(node => node.type === 'button' && ui.text(node) === '画风').props.onClick(); ui.render()
+  assert.equal(ui.find(node => node.type === 'textarea' && node.props['aria-label'] === '预设正面指导 我的预设').props.value, 'legacy draft')
 })
 
 test('JSON 网络错误时 POST 只发送一次，避免重复创建或扣费', async () => {

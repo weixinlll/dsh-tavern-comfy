@@ -5,6 +5,7 @@ import vm from 'node:vm'
 
 const source = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
   .replace('exports.apply = apply', 'exports.apply = apply; exports.__test = { SettingsPanel, OfficialImage, createHistoryRequestEpoch, indexedHistoryChanges }')
+const packageName = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).name
 const flush = () => new Promise(resolve => setImmediate(resolve))
 const copy = value => JSON.parse(JSON.stringify(value))
 const person = (id, name) => ({ id, name, match: '', note: '', continuity: '', enabled: true, cards: [], outfitRefs: [], traits: { feature: 'gentle', face: 'black hair' }, outfits: [] })
@@ -20,6 +21,7 @@ function harness(extra = {}, characters = [person('a', '甲'), person('b', '乙'
   let cursor = 0
   let pendingEffects = []
   let api
+  let moduleId
   let tree
   let state = { config: {}, workflows: [], outfits: [], definitions: { characters: copy(characters), outfits: [] }, tasks: [{ id: 'task', state: 'running', startedAt: Date.now() }] }
   const requests = []
@@ -41,7 +43,7 @@ function harness(extra = {}, characters = [person('a', '甲'), person('b', '乙'
     },
   }
   const context = {
-    window: { location: { origin: 'http://test.local' }, top: { location: { origin: 'http://test.local' } }, addEventListener() {}, __ModuleLoader__: { load({ factory }) { api = factory(name => { assert.equal(name, 'react'); return React }) } } },
+    window: { location: { origin: 'http://test.local' }, top: { location: { origin: 'http://test.local' } }, addEventListener() {}, __ModuleLoader__: { load({ id, factory }) { moduleId = id; api = factory(name => { assert.equal(name, 'react'); return React }) } } },
     location: { origin: 'http://test.local', href: 'http://test.local' },
     document: { baseURI: 'http://test.local', createElement() { return { files: [{ type: 'image/png', name: 'ref.png' }], click() { this.onchange() } } } },
     FileReader: class { readAsDataURL() { this.result = 'data:image/png;base64,test'; this.onload() } },
@@ -102,8 +104,12 @@ function harness(extra = {}, characters = [person('a', '甲'), person('b', '乙'
     await ready()
     button('插件更新').props.onClick(); render(); await flush(); render()
   }
-  return { React, api, ready, openPluginUpdate, render, button, input, role, roleInput, rolePanels, nodes, text, intervals, requests, get state() { return state } }
+  return { React, api, moduleId, ready, openPluginUpdate, render, button, input, role, roleInput, rolePanels, nodes, text, intervals, requests, get state() { return state } }
 }
+
+test('client module registration matches the package key DSH uses to load it', () => {
+  assert.equal(harness().moduleId, packageName)
+})
 
 test('图片说明交由 Tavern 渲染，插件保留 alt 且不重复显示 caption', () => {
   const ui = harness()
@@ -496,7 +502,7 @@ test('插件更新检查与安装分离，重复点击合并请求，成功后�
   })
   await ui.openPluginUpdate()
   const stateReads = ui.requests.filter(request => request.path === 'state').length
-  assert.ok(ui.requests.some(request => request.pathname === '/plugins/dsh-tavern-comfy/plugin-update' && request.method === 'GET'))
+  assert.ok(ui.requests.some(request => request.pathname === '/plugins/dsh-tavern-image/plugin-update' && request.method === 'GET'))
 
   const check = ui.button('检查更新').props.onClick
   const firstCheck = check()
@@ -506,7 +512,7 @@ test('插件更新检查与安装分离，重复点击合并请求，成功后�
   assert.equal(applyCalls, 0)
   checking.resolve({ ok: true, currentVersion: '1.2.1', latestVersion: '1.3.0', available: true, canUpdate: true, target: 'v1.3.0' })
   await Promise.all([firstCheck, duplicateCheck]); await flush(); ui.render()
-  const checkRequest = ui.requests.find(request => request.pathname === '/plugins/dsh-tavern-comfy/plugin-update/check')
+  const checkRequest = ui.requests.find(request => request.pathname === '/plugins/dsh-tavern-image/plugin-update/check')
   assert.equal(checkRequest.method, 'POST')
   assert.deepEqual(checkRequest.body, {})
   assert.match(ui.text(ui.render()), /1\.3\.0/)
@@ -517,7 +523,7 @@ test('插件更新检查与安装分离，重复点击合并请求，成功后�
   const duplicateApply = apply()
   await flush()
   assert.equal(applyCalls, 1)
-  const applyRequest = ui.requests.find(request => request.pathname === '/plugins/dsh-tavern-comfy/plugin-update/apply')
+  const applyRequest = ui.requests.find(request => request.pathname === '/plugins/dsh-tavern-image/plugin-update/apply')
   assert.equal(applyRequest.method, 'POST')
   assert.deepEqual(applyRequest.body, { target: 'v1.3.0' })
   installing.resolve({ ok: true, currentVersion: '1.3.0', latestVersion: '1.3.0', available: false, canUpdate: false, restartRequired: true, message: '插件更新完成，请完整重启 DSH 后生效。' })
@@ -527,6 +533,34 @@ test('插件更新检查与安装分离，重复点击合并请求，成功后�
   assert.ok(!updateButton || updateButton.props.disabled)
   assert.equal(applyCalls, 1)
   assert.equal(ui.requests.filter(request => request.path === 'state').length, stateReads)
+})
+
+test('旧目录安装在插件更新页持续显示退出 DSH 后手动迁移提示', async () => {
+  const migrationMessage = '旧版安装仍在 dsh-tavern-comfy 目录。请先完全退出 DSH，再将该文件夹改名为 dsh-tavern-image，然后重新启动。'
+  const ui = harness({
+    'plugin-update': () => ({ ok: true, currentVersion: '2.1.0', supported: true, directoryMigrationRequired: true, directoryMigrationMessage: migrationMessage }),
+  })
+  await ui.openPluginUpdate()
+  assert.match(ui.text(ui.render()), /完全退出 DSH/)
+  assert.match(ui.text(ui.render()), /dsh-tavern-comfy/)
+  assert.match(ui.text(ui.render()), /dsh-tavern-image/)
+})
+
+test('旧目录旁已有新目录时显示冲突原因，不提示用户直接改名', async () => {
+  const ui = harness({
+    'plugin-update': () => ({
+      ok: true,
+      currentVersion: '2.1.0',
+      supported: false,
+      directoryMigrationRequired: true,
+      directoryMigrationMessage: '请退出 DSH 后改目录。',
+      reason: '新插件目录已存在。请先备份并处理两个目录。',
+    }),
+  })
+  await ui.openPluginUpdate()
+  const rendered = ui.text(ui.render())
+  assert.match(rendered, /新插件目录已存在/)
+  assert.doesNotMatch(rendered, /请退出 DSH 后改目录/)
 })
 
 test('插件更新检查失败后可重试', async () => {
@@ -545,7 +579,7 @@ test('插件更新检查失败后可重试', async () => {
   ui.button('检查更新').props.onClick(); await flush(); ui.render()
   assert.equal(checkCalls, 2)
   assert.equal(ui.button('更新插件').props.disabled, false)
-  assert.equal(ui.requests.filter(request => request.pathname === '/plugins/dsh-tavern-comfy/plugin-update/apply').length, 0)
+  assert.equal(ui.requests.filter(request => request.pathname === '/plugins/dsh-tavern-image/plugin-update/apply').length, 0)
 })
 
 test('人物草稿未保存时阻止插件安装并保留草稿', async () => {
@@ -567,7 +601,7 @@ test('人物草稿未保存时阻止插件安装并保留草稿', async () => {
 
   ui.button('人物库').props.onClick(); ui.render()
   assert.equal(ui.roleInput('a', '角色名').props.value, '未保存角色名')
-  assert.equal(ui.requests.filter(request => request.pathname === '/plugins/dsh-tavern-comfy/plugin-update/apply').length, 0)
+  assert.equal(ui.requests.filter(request => request.pathname === '/plugins/dsh-tavern-image/plugin-update/apply').length, 0)
 })
 
 test('更新请求跨页成功后保留重启状态并保留人物页新草稿', async () => {

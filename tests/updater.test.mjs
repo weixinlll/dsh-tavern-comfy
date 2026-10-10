@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, writeFile, rm, rename } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve, dirname, basename } from 'node:path'
 import { createPluginUpdater, REPOSITORY_URL } from '../lib/updater.js'
@@ -12,9 +12,9 @@ async function command(root, args) {
   const result = await exec('git', ['-c', 'user.name=Update test', '-c', 'user.email=update-test@example.invalid', ...args], { cwd: root, windowsHide: true })
   return result.stdout.trim()
 }
-async function fixture(t) {
+async function fixture(t, options = {}) {
   const base = await mkdtemp(join(tmpdir(), 'dsh-comfy-update-test-'))
-  const root = join(base, 'plugin'), remote = join(base, 'remote')
+  const root = join(base, options.rootName || 'plugin'), remote = join(base, 'remote')
   await mkdir(root)
   await command(root, ['init', '-b', 'master'])
   await command(root, ['config', 'core.autocrlf', 'false'])
@@ -24,7 +24,7 @@ async function fixture(t) {
   await command(root, ['add', '.']); await command(root, ['commit', '-m', 'initial'])
   await command(base, ['clone', root, remote])
   await command(remote, ['config', 'core.autocrlf', 'false'])
-  await writeFile(join(remote, 'package.json'), JSON.stringify({ name: 'dsh-tavern-comfy', version: '1.2.1' }))
+  await writeFile(join(remote, 'package.json'), JSON.stringify({ name: options.remotePackageName || 'dsh-tavern-comfy', version: options.remoteVersion || '1.2.1' }))
   await writeFile(join(remote, 'client.js'), 'new code\n')
   await command(remote, ['add', '.']); await command(remote, ['commit', '-m', 'update'])
   await command(root, ['remote', 'add', 'origin', REPOSITORY_URL + '.git'])
@@ -116,6 +116,62 @@ test('renamed GitHub repository keeps existing installs on the legacy origin upd
   assert.equal(REPOSITORY_URL, 'https://github.com/weixinlll/dsh-tavern-image')
   assert.equal(status.repositoryUrl, REPOSITORY_URL)
   assert.equal(status.supported, true)
+})
+
+test('updater accepts the new package id while preserving the legacy package id for this transition', async t => {
+  const f = await fixture(t, { remotePackageName: 'dsh-tavern-image' })
+  const checked = await f.updater.check()
+  assert.equal(checked.available, true)
+  assert.equal(checked.latestVersion, '1.2.1')
+})
+
+test('updating the old install leaves the active directory in place and asks for a safe manual migration', async t => {
+  const f = await fixture(t, { rootName: 'dsh-tavern-comfy', remoteVersion: '2.1.0' })
+  const config = JSON.stringify({ token: 'keep' })
+  await writeFile(join(f.root, 'config.json'), config)
+  await mkdir(join(f.root, 'workflows'))
+  await writeFile(join(f.root, 'workflows', 'user.json'), '{"workflow":"keep"}')
+  const checked = await f.updater.check()
+  assert.equal(checked.canUpdate, true)
+  const result = await f.updater.apply(checked.target)
+  const renamedRoot = join(f.base, 'dsh-tavern-image')
+  assert.equal(result.directoryMigrationRequired, true)
+  assert.match(result.message, /完整退出 DSH 后.*改名为 dsh-tavern-image/)
+  assert.equal(await readFile(join(f.root, 'config.json'), 'utf8'), config)
+  assert.equal(await readFile(join(f.root, 'workflows', 'user.json'), 'utf8'), '{"workflow":"keep"}')
+  await assert.rejects(readFile(join(renamedRoot, 'config.json')), { code: 'ENOENT' })
+  assert.equal(await command(f.root, ['remote', 'get-url', 'origin']), REPOSITORY_URL + '.git')
+})
+
+test('a fast-forward performed by the legacy updater is reported as requiring a one-time directory rename', async t => {
+  const f = await fixture(t, { rootName: 'dsh-tavern-comfy', remoteVersion: '2.1.0' })
+  // The v2.0.0 updater only fast-forwards; it cannot run the new updater code during the same request.
+  await command(f.root, ['fetch', '--no-tags', f.remote, 'master'])
+  const target = await command(f.root, ['rev-parse', 'FETCH_HEAD'])
+  await command(f.root, ['merge', '--ff-only', '--no-edit', target])
+
+  const restartedUpdater = createPluginUpdater({ root: f.root, git: f.git })
+  const status = await restartedUpdater.status()
+  assert.equal(status.currentVersion, '2.1.0')
+  assert.equal(status.directoryMigrationRequired, true)
+  assert.match(status.directoryMigrationMessage, /完全退出 DSH.*改名为 dsh-tavern-image/)
+
+  const renamedRoot = join(f.base, 'dsh-tavern-image')
+  await rename(f.root, renamedRoot)
+  const migratedUpdater = createPluginUpdater({ root: renamedRoot, git: args => command(renamedRoot, args) })
+  const migratedStatus = await migratedUpdater.status()
+  assert.equal(migratedStatus.supported, true)
+  assert.equal(migratedStatus.directoryMigrationRequired, false)
+})
+
+test('updater stops before install when the new folder already exists', async t => {
+  const f = await fixture(t, { rootName: 'dsh-tavern-comfy' })
+  await mkdir(join(f.base, 'dsh-tavern-image'))
+  const status = await f.updater.status()
+  assert.equal(status.supported, false)
+  assert.match(status.reason, /新插件目录已存在/)
+  assert.equal((await f.updater.check()).canUpdate, false)
+  assert.equal(f.calls.some(args => args[0] === 'fetch'), false)
 })
 
 test('concurrent checks are refused and failed network checks can retry', async t => {

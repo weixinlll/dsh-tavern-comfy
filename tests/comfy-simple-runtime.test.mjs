@@ -64,7 +64,7 @@ test('simple mode reads capabilities without generating, then builds a job witho
     apply(ctx)
     const request = (path, body) => new Promise((resolve, reject) => {
       const req = Readable.from([Buffer.from(JSON.stringify(body ?? {}))])
-      Object.assign(req, { method: 'POST', url: '/plugins/dsh-tavern-comfy/' + path, headers: { host: 'localhost', 'content-type': 'application/json' } })
+      Object.assign(req, { method: 'POST', url: '/plugins/dsh-tavern-image/' + path, headers: { host: 'localhost', 'content-type': 'application/json' } })
       const response = { headersSent: false, writeHead(status) { this.status = status; this.headersSent = true }, end(value) { try { resolve({ status: this.status, body: JSON.parse(String(value)) }) } catch (error) { reject(error) } } }
       routes.get(req.url)(req, response)
     })

@@ -451,7 +451,7 @@ function renderWorkflows() {
     card.appendChild(facts)
 
     if (wf.error) {
-      card.appendChild(text('div', 'hint', '读不了：' + wf.error + '　（需要是 ComfyUI 导出的 API 格式，或 Tavern 导入用的 dsh-tavern-comfy-v1 包装）'))
+      card.appendChild(text('div', 'hint', '读不了：' + wf.error + '　（需要是 ComfyUI 导出的 API 格式，或 Tavern 导入用的 dsh-tavern-image-v1 包装）'))
     }
 
     // 触发条件
@@ -531,12 +531,12 @@ function renderWorkflows() {
 }
 
 async function saveWorkflow(id, patch) {
-  try { applyState((await api('/plugins/dsh-tavern-comfy/workflow', { id, ...patch })).state); toast('已保存') }
+  try { applyState((await api('/plugins/dsh-tavern-image/workflow', { id, ...patch })).state); toast('已保存') }
   catch (error) { toast(error.message, true) }
 }
 
 async function saveConfig(patch) {
-  try { applyState((await api('/plugins/dsh-tavern-comfy/config', { config: patch })).state); toast('已保存') }
+  try { applyState((await api('/plugins/dsh-tavern-image/config', { config: patch })).state); toast('已保存') }
   catch (error) { toast(error.message, true) }
 }
 
@@ -603,7 +603,7 @@ function renderLibrary() {
 }
 
 async function saveDefinitions() {
-  try { applyState((await api('/plugins/dsh-tavern-comfy/definitions', { definitions: state.definitions })).state); toast('人物形象已保存') }
+  try { applyState((await api('/plugins/dsh-tavern-image/definitions', { definitions: state.definitions })).state); toast('人物形象已保存') }
   catch (error) { toast(error.message, true) }
 }
 
@@ -619,7 +619,7 @@ function renderJobs() {
     const card = text('div', 'thumb')
     if (job.hasImage) {
       const img = document.createElement('img')
-      img.src = '/plugins/dsh-tavern-comfy/jobs?id=' + encodeURIComponent(job.id) + '&image=1'
+      img.src = '/plugins/dsh-tavern-image/jobs?id=' + encodeURIComponent(job.id) + '&image=1'
       img.loading = 'lazy'
       img.title = '点开看大图'
       img.addEventListener('click', () => window.open(img.src, '_blank'))
@@ -643,7 +643,7 @@ function renderJobs() {
 }
 
 async function refreshJobs() {
-  try { state.jobs = (await api('/plugins/dsh-tavern-comfy/history')).jobs || []; renderJobs() } catch {}
+  try { state.jobs = (await api('/plugins/dsh-tavern-image/history')).jobs || []; renderJobs() } catch {}
 }
 
 // ================= 高级设置 =================
@@ -747,7 +747,7 @@ function applyState(next) {
 }
 
 async function load() {
-  try { applyState(await api('/plugins/dsh-tavern-comfy/state')) }
+  try { applyState(await api('/plugins/dsh-tavern-image/state')) }
   catch (error) { toast('读不到状态：' + error.message, true) }
 }
 
@@ -762,7 +762,7 @@ document.querySelectorAll('nav button').forEach(button => {
 })
 
 $('#btnReload').addEventListener('click', async () => {
-  try { applyState((await api('/plugins/dsh-tavern-comfy/reload', {})).state); toast('已重新查找 workflows 文件夹里的工作流') }
+  try { applyState((await api('/plugins/dsh-tavern-image/reload', {})).state); toast('已重新查找 workflows 文件夹里的工作流') }
   catch (error) { toast(error.message, true) }
 })
 $('#currentWorkflow').addEventListener('change', event => saveConfig({ defaultWorkflow: event.target.value }))
@@ -808,7 +808,7 @@ $('#btnTest').addEventListener('click', async () => {
   button.disabled = true
   $('#testStatus').textContent = '提交中…'
   try {
-    const created = await api('/plugins/dsh-tavern-comfy/generate', {
+    const created = await api('/plugins/dsh-tavern-image/generate', {
       workflow: $('#testWorkflow').value,
       tag: $('#testTag').value,
       artist: $('#testArtist').value,
@@ -818,11 +818,11 @@ $('#btnTest').addEventListener('click', async () => {
     const id = created.jobId
     for (let i = 0; i < 900; i++) {
       await new Promise(r => setTimeout(r, 1000))
-      const job = await api('/plugins/dsh-tavern-comfy/jobs?id=' + encodeURIComponent(id))
+      const job = await api('/plugins/dsh-tavern-image/jobs?id=' + encodeURIComponent(id))
       if (job.status === 'done' || job.status === 'failed') {
         if (job.status === 'failed') throw new Error(job.error || '画失败了')
         const img = document.createElement('img')
-        img.src = '/plugins/dsh-tavern-comfy/jobs?id=' + encodeURIComponent(id) + '&image=1'
+        img.src = '/plugins/dsh-tavern-image/jobs?id=' + encodeURIComponent(id) + '&image=1'
         img.style.maxWidth = '420px'
         img.style.borderRadius = '10px'
         img.style.cursor = 'zoom-in'
@@ -849,7 +849,7 @@ $('#btnPlan').addEventListener('click', async () => {
   $('#planResult').innerHTML = ''
   $('#planStatus').textContent = '规划中…（模型要读规则 + 写提示词，通常十几秒）'
   try {
-    const result = await api('/plugins/dsh-tavern-comfy/plan', {
+    const result = await api('/plugins/dsh-tavern-image/plan', {
       messageId: 'console-' + Date.now(),
       turn: 0,
       text: source,
@@ -902,8 +902,8 @@ $('#btnPlan').addEventListener('click', async () => {
           for (let i = 0; i < 240; i++) {
             await new Promise(r => setTimeout(r, 2000))
             try {
-              const j = await api('/plugins/dsh-tavern-comfy/jobs?id=' + encodeURIComponent(plan.jobId))
-              if (j.job.status === 'done') { img.src = '/plugins/dsh-tavern-comfy/jobs?id=' + encodeURIComponent(plan.jobId) + '&image=1'; img.addEventListener('click', () => window.open(img.src, '_blank')); $('#planStatus').textContent = '画好了'; break }
+              const j = await api('/plugins/dsh-tavern-image/jobs?id=' + encodeURIComponent(plan.jobId))
+              if (j.job.status === 'done') { img.src = '/plugins/dsh-tavern-image/jobs?id=' + encodeURIComponent(plan.jobId) + '&image=1'; img.addEventListener('click', () => window.open(img.src, '_blank')); $('#planStatus').textContent = '画好了'; break }
               if (j.job.status === 'failed') { img.alt = '失败：' + (j.job.error || ''); img.removeAttribute('src'); $('#planStatus').textContent = '有一张失败：' + (j.job.error || ''); break }
             } catch (error) { /* 继续等 */ }
           }

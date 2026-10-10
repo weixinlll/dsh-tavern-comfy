@@ -1,4 +1,4 @@
-/* dsh-tavern-comfy 浏览器半边。
+/* dsh-tavern-image 浏览器半边。
  *
  * 正文里的图**不再由插件接管渲染**。Tavern 开放官方插件接口后，宿主侧的
  * tavern.attach 已经能把图片和正文版本绑在一起（回退自动隐藏、切回来又出现），
@@ -10,13 +10,15 @@
  *
  * 配置读取失败时安静退化成纯文本，绝不在宿主启动阶段抛错。 */
 window.__ModuleLoader__.load({
+  // DSH resolves browser registrations by package.json.name. Keep this key
+  // during the upgrade bridge; the host/plugin identity is image.
   id: 'dsh-tavern-comfy',
   factory: (require) => {
     const module = { exports: {} }
     const exports = module.exports
     let React = null
     try { React = require('react') } catch (error) {
-      try { console.warn('[dsh-tavern-comfy] React 不可用，浏览器界面已禁用:', error?.message) } catch {}
+      try { console.warn('[dsh-tavern-image] React 不可用，浏览器界面已禁用:', error?.message) } catch {}
       exports.apply = () => {}
       exports.inject = []
       return module.exports
@@ -33,7 +35,7 @@ const absoluteBase = (() => {
   try { if (location.origin) candidates.push(location.origin) } catch {}
   try { if (document.baseURI) candidates.push(new URL(document.baseURI).origin) } catch {}
   const origin = candidates.find(o => o && o !== 'null' && /^https?:/i.test(o))
-  return (origin || '') + '/plugins/dsh-tavern-comfy'
+  return (origin || '') + '/plugins/dsh-tavern-image'
 })()
 const BASE = absoluteBase
 
@@ -385,7 +387,7 @@ let openImageOverlay = null
     }
 
 
-    /** 官方接口下的插图（kind = dsh-tavern-comfy/image）。
+    /** 官方接口下的插图（kind = dsh-tavern-image/image）。
      *  item.data 里带着 jobId —— 所以放大、右键看提示词、长按、重画全都照用。
      *  官方内置的 image 类型做不到这些（尺寸和交互由 Tavern 固定，插件插不进手）。 */
     function OfficialImage(props) {
@@ -757,11 +759,12 @@ let openImageOverlay = null
 
     /** 重画后：旧作业 id → 新作业 id（同一条消息里就地换图） */
     // 重画版本链：旧 jobId → 新 jobId。持久化到 localStorage，刷新后还能翻历史版本。
-const REDRAW_KEY = 'rphub-comfy-redraw-versions'
+const REDRAW_KEY = 'dsh-tavern-image-redraw-versions'
+const LEGACY_REDRAW_KEY = 'rphub-comfy-redraw-versions'
 const redrawnJobs = (() => {
   const map = new Map()
   try {
-    const raw = localStorage.getItem(REDRAW_KEY)
+    const raw = localStorage.getItem(REDRAW_KEY) || localStorage.getItem(LEGACY_REDRAW_KEY)
     if (raw) for (const [k, v] of Object.entries(JSON.parse(raw))) map.set(String(k), String(v))
   } catch {}
   return map
@@ -835,7 +838,7 @@ function versionsOf(jobId) {
           if (!r?.ok || !r.jobId) { say('重画失败：' + (r?.error || '没拿到新作业')); return }
           redrawnJobs.set(view.jobId, r.jobId)
           persistRedraw()
-          try { window.dispatchEvent(new CustomEvent('rphub-comfy:planned', { detail: { messageId: String(lastSessionId || '') } })) } catch {}
+          try { window.dispatchEvent(new CustomEvent('dsh-tavern-image:planned', { detail: { messageId: String(lastSessionId || '') } })) } catch {}
           close()
           if (typeof openImageOverlay === 'function') (() => {
                   const chain = versionsOf(r.jobId)
@@ -986,8 +989,8 @@ function versionsOf(jobId) {
             })
             .catch(() => {})
         }
-        window.addEventListener('rphub-comfy:planned', handler)
-        return () => window.removeEventListener('rphub-comfy:planned', handler)
+        window.addEventListener('dsh-tavern-image:planned', handler)
+        return () => window.removeEventListener('dsh-tavern-image:planned', handler)
       }, [messageId])
 
       // 只有出过图才轮询进度，平时一声不响
@@ -1150,7 +1153,7 @@ function versionsOf(jobId) {
             const got = (response?.plans ?? []).length
             reportHost('plan-response', { ok: response?.ok, plans: got, error: response?.error ?? '' })
             if (got) {
-              try { window.dispatchEvent(new CustomEvent('rphub-comfy:planned', { detail: { messageId } })) } catch {}
+              try { window.dispatchEvent(new CustomEvent('dsh-tavern-image:planned', { detail: { messageId } })) } catch {}
             }
             return null
           })
@@ -1262,7 +1265,7 @@ function versionsOf(jobId) {
           setPlans(list)
           try {
             reportHost('inline-dispatch', { messageId: String(messageId ?? ''), textLen: String(text ?? '').length, plans: list.length })
-            window.dispatchEvent(new CustomEvent('rphub-comfy:planned', { detail: { messageId: String(messageId ?? '') } }))
+            window.dispatchEvent(new CustomEvent('dsh-tavern-image:planned', { detail: { messageId: String(messageId ?? '') } }))
           } catch (error) { reportHost('inline-dispatch-failed', { message: String(error?.message ?? error) }) }
         } catch (error) {
           reportHost('plan-threw', { message: String(error?.message ?? error).slice(0, 300) })
@@ -1535,7 +1538,7 @@ function versionsOf(jobId) {
           setNote('已生成 ' + list.length + ' 张')
           setJobIds(list.map(item => item.jobId).filter(Boolean))
           // 正文里那套渲染是另一个组件，靠这个事件让它去取新计划并插图
-          try { window.dispatchEvent(new CustomEvent('rphub-comfy:planned', { detail: { messageId } })) } catch {}
+          try { window.dispatchEvent(new CustomEvent('dsh-tavern-image:planned', { detail: { messageId } })) } catch {}
         } catch (error) {
           setState('failed')
           setNote(error && error.message ? error.message : String(error))
@@ -2011,6 +2014,8 @@ function versionsOf(jobId) {
           const next = Object.assign({}, current, {
             currentVersion: status?.currentVersion ?? current?.currentVersion,
             restartRequired: status?.restartRequired ?? current?.restartRequired,
+            directoryMigrationRequired: status?.directoryMigrationRequired ?? current?.directoryMigrationRequired,
+            directoryMigrationMessage: status?.directoryMigrationMessage ?? current?.directoryMigrationMessage,
           })
           if (typeof status?.supported === 'boolean') {
             next.supported = status.supported
@@ -2032,7 +2037,9 @@ function versionsOf(jobId) {
           setPluginUpdateLocal(status)
           setPluginUpdateNote(status?.supported === false
             ? (status.reason || '当前安装方式暂不支持自动更新。')
-            : status?.restartRequired ? '插件需要完整重启 DSH 后生效。' : '')
+            : status?.restartRequired
+              ? '插件需要完整重启 DSH 后生效。'
+              : status?.directoryMigrationRequired ? status.directoryMigrationMessage : '')
         } catch (error) {
           if (view !== pluginUpdateView.current || pluginUpdateTabRef.current !== 'plugin-update') return
           setPluginUpdateNote('读取本地插件状态失败：' + (error?.message ?? error))
@@ -2057,15 +2064,17 @@ function versionsOf(jobId) {
           mergePluginUpdateLocalStatus(status)
           const supported = status?.supported ?? pluginUpdateLocal?.supported
           const reason = status?.reason ?? (status?.supported === false ? '' : pluginUpdateLocal?.reason)
-          setPluginUpdateNote(status?.restartRequired
-            ? (status.message && status.message.includes('完整重启 DSH') ? status.message : [status.message, '插件已更新，需要完整重启 DSH 才会生效。'].filter(Boolean).join(' '))
-            : supported === false
-              ? (reason || '当前安装方式暂不支持自动更新。')
-              : reason
-                ? reason
-                : status?.available
-              ? (status?.canUpdate ? '发现可用更新。' : (status?.reason || '发现新版本，但当前无法自动更新。'))
-              : '当前已是最新版本。')
+          setPluginUpdateNote(supported === false
+            ? (reason || '当前安装方式暂不支持自动更新。')
+            : status?.restartRequired
+              ? (status.message && status.message.includes('完整重启 DSH') ? status.message : [status.message, '插件已更新，需要完整重启 DSH 才会生效。'].filter(Boolean).join(' '))
+              : status?.directoryMigrationRequired
+                ? [status?.available ? '发现可用更新。' : '', status.directoryMigrationMessage].filter(Boolean).join(' ')
+                : reason
+                  ? reason
+                  : status?.available
+                    ? (status?.canUpdate ? '发现可用更新。' : (status?.reason || '发现新版本，但当前无法自动更新。'))
+                    : '当前已是最新版本。')
         } catch (error) {
           if (view !== pluginUpdateView.current || pluginUpdateTabRef.current !== 'plugin-update') return
           setPluginUpdateNote('检查更新失败：' + (error?.message ?? error))
@@ -3985,10 +3994,11 @@ function versionsOf(jobId) {
         const optStyle = { color: '#12161c', background: '#e9eef6' }
         const library = Array.isArray(config.promptPresetLibrary) ? config.promptPresetLibrary : []
         const saved = Array.isArray(config.promptPresets) ? config.promptPresets : []
-        const draftStorageKey = 'dsh-tavern-comfy-prompt-draft-v1'
+        const draftStorageKey = 'dsh-tavern-image-prompt-draft-v1'
+        const legacyDraftStorageKey = 'dsh-tavern-comfy-prompt-draft-v1'
         const readDraft = () => {
           try {
-            const cached = JSON.parse(window.localStorage?.getItem(draftStorageKey) || 'null')
+            const cached = JSON.parse(window.localStorage?.getItem(draftStorageKey) || window.localStorage?.getItem(legacyDraftStorageKey) || 'null')
             return Array.isArray(cached) && cached.length <= 60 ? cached : saved
           } catch { return saved }
         }
@@ -4085,6 +4095,7 @@ function versionsOf(jobId) {
         const restartNeeded = pluginUpdateCheck?.restartRequired === true || pluginUpdateLocal?.restartRequired === true
         const canUpdate = supported && pluginUpdateCheck?.available === true && pluginUpdateCheck?.canUpdate === true && !restartNeeded
         const latestConfirmed = pluginUpdateCheck?.available === false && pluginUpdateCheck?.restartRequired !== true && pluginUpdateCheck?.supported !== false && pluginUpdateLocal?.supported !== false && !pluginUpdateCheck?.reason && !pluginUpdateLocal?.reason
+        const migrationNeeded = pluginUpdateLocal?.directoryMigrationRequired === true && pluginUpdateLocal?.supported !== false
         return h('div', null,
           h('div', { style: S.card },
             h('div', { style: { fontSize: '14px', fontWeight: 600, marginBottom: '8px' } }, '插件更新'),
@@ -4099,9 +4110,10 @@ function versionsOf(jobId) {
               h('button', { style: buttonStyle, disabled: !canUpdate || Boolean(pluginUpdatePending), onClick: applyPluginUpdate }, pluginUpdatePending === 'apply' ? '正在更新…' : '更新插件'),
               !pluginUpdateLocal && pluginUpdatePending !== 'local' ? h('button', { style: buttonStyle, disabled: Boolean(pluginUpdatePending), onClick: () => { pluginUpdateLocalAttempted.current = true; void loadPluginUpdateLocal() } }, '重试读取本地状态') : null,
             ),
-            h('div', { role: 'status', 'aria-live': 'polite', style: { minHeight: '18px', fontSize: '12px', color: restartNeeded ? '#f0b45c' : '#9aa3b2', marginTop: '8px' } },
+            h('div', { role: 'status', 'aria-live': 'polite', style: { minHeight: '18px', fontSize: '12px', color: restartNeeded || migrationNeeded ? '#f0b45c' : '#9aa3b2', marginTop: '8px' } },
               pluginUpdateNote || (pluginUpdatePending === 'local' ? '读取本地插件状态…' : ''),
             ),
+            migrationNeeded ? h('div', { role: 'note', style: { fontSize: '12px', color: '#f0b45c', marginTop: '8px', lineHeight: 1.55 } }, pluginUpdateLocal.directoryMigrationMessage) : null,
             h('div', { style: { fontSize: '12px', color: '#9aa3b2', marginTop: '8px', lineHeight: 1.55 } }, '只更新插件代码；配置和人物库会保留。更新完成后请完整重启 DSH 才会生效。'),
           ),
         )
@@ -4135,12 +4147,12 @@ function versionsOf(jobId) {
         const onOpen = () => setOpen(true)
         const onKey = event => { if (event.key === 'Escape') setOpen(false) }
         try {
-          window.addEventListener('dsh-tavern-comfy:open-console', onOpen)
+          window.addEventListener('dsh-tavern-image:open-console', onOpen)
           window.addEventListener('keydown', onKey)
         } catch {}
         return () => {
           try {
-            window.removeEventListener('dsh-tavern-comfy:open-console', onOpen)
+            window.removeEventListener('dsh-tavern-image:open-console', onOpen)
             window.removeEventListener('keydown', onKey)
           } catch {}
         }
@@ -4180,7 +4192,7 @@ function versionsOf(jobId) {
     function ConsoleLauncher(props) {
       const wide = props?.wide !== false
       const [hover, setHover] = React.useState(false)
-      const open = () => { try { window.dispatchEvent(new CustomEvent('dsh-tavern-comfy:open-console')) } catch {} }
+      const open = () => { try { window.dispatchEvent(new CustomEvent('dsh-tavern-image:open-console')) } catch {} }
       return h('button', {
         type: 'button',
         title: '本地生图控制台（人物库 / 历史图 / 世界书 / 画风）',
@@ -4236,7 +4248,7 @@ function versionsOf(jobId) {
         try {
           ctx.slots?.inject?.('shell.overlay', () => ctx.slots.register({
             name: 'shell.overlay',
-            id: 'dsh-tavern-comfy-console',
+            id: 'dsh-tavern-image-console',
             order: 95,
           }, ConsoleOverlay))
           reportHost('seat-registered', { seat: 'shell.overlay.console' })
@@ -4248,7 +4260,7 @@ function versionsOf(jobId) {
         try {
           ctx.slots?.inject?.('sidebar.footer.action', () => ctx.slots.register({
             name: 'sidebar.footer.action',
-            id: 'dsh-tavern-comfy-launcher',
+            id: 'dsh-tavern-image-launcher',
             order: 48,
             label: '本地生图',
           }, ConsoleLauncher))
@@ -4261,7 +4273,7 @@ function versionsOf(jobId) {
         try {
           ctx.slots?.inject?.('shell.overlay', () => ctx.slots.register({
             name: 'shell.overlay',
-            id: 'rphub-comfy-overlay',
+            id: 'dsh-tavern-image-overlay',
             order: 90,
           }, ImageOverlay))
           reportHost('seat-registered', { seat: 'shell.overlay' })
@@ -4273,7 +4285,7 @@ function versionsOf(jobId) {
         try {
           ctx.slots?.inject?.('shell.overlay', () => ctx.slots.register({
             name: 'shell.overlay',
-            id: 'rphub-comfy-prompt-editor',
+            id: 'dsh-tavern-image-prompt-editor',
             order: 91,
           }, PromptEditor))
           reportHost('seat-registered', { seat: 'shell.overlay.prompt-editor' })
@@ -4286,7 +4298,7 @@ function versionsOf(jobId) {
         try {
           ctx.slots?.inject?.('shell.overlay', () => ctx.slots.register({
             name: 'shell.overlay',
-            id: 'rphub-comfy-cardpicker',
+            id: 'dsh-tavern-image-cardpicker',
             order: 93,
           }, CardPicker))
           reportHost('seat-registered', { seat: 'shell.overlay.cardpicker' })
@@ -4298,7 +4310,7 @@ function versionsOf(jobId) {
         try {
           ctx.slots?.inject?.('shell.overlay', () => ctx.slots.register({
             name: 'shell.overlay',
-            id: 'rphub-comfy-toast',
+            id: 'dsh-tavern-image-toast',
             order: 99,
           }, Toast))
           reportHost('seat-registered', { seat: 'shell.overlay.toast' })
@@ -4310,7 +4322,7 @@ function versionsOf(jobId) {
         try {
           ctx.slots?.inject?.('shell.overlay', () => ctx.slots.register({
             name: 'shell.overlay',
-            id: 'rphub-comfy-contextmenu',
+            id: 'dsh-tavern-image-contextmenu',
             order: 100,
           }, ContextMenu))
           reportHost('seat-registered', { seat: 'shell.overlay.contextmenu' })
@@ -4322,14 +4334,14 @@ function versionsOf(jobId) {
         try {
           const ok = ctx.slots?.inject?.('conversation.chat.assistant-actions', () => ctx.slots.register({
             name: 'conversation.chat.assistant-actions',
-            id: 'rphub-comfy',
+            id: 'dsh-tavern-image',
             order: 30,
             inject: (sessionId) => ({ sessionId }),
           }, ImageActionButton))
           reportHost('seat-registered', { seat: 'assistant-actions', injectReturned: ok !== undefined })
         } catch (error) {
           reportHost('seat-failed', { seat: 'assistant-actions', error: String(error?.message ?? error) })
-          console.warn('[dsh-tavern-comfy] 生图按钮未注册:', error?.message)
+          console.warn('[dsh-tavern-image] 生图按钮未注册:', error?.message)
         }
 
         // 设置 → 本地生图（与「错题库」「卡片更新器」同一层）
@@ -4337,12 +4349,12 @@ function versionsOf(jobId) {
           reportHost('seat-registered', { seat: 'settings.section' })
           ctx.slots?.inject?.('settings.section', () => ctx.slots.register({
             name: 'settings.section',
-            id: 'rphub-comfy',
+            id: 'dsh-tavern-image',
             order: 47,
             label: () => '本地生图',
           }, SettingsPanel))
         } catch (error) {
-          console.warn('[dsh-tavern-comfy] 设置页面未注册:', error?.message)
+          console.warn('[dsh-tavern-image] 设置页面未注册:', error?.message)
         }
 
         // ===== Tavern 官方浏览器接口（tavernUi，接口版本 1）=====
@@ -4356,7 +4368,7 @@ function versionsOf(jobId) {
           const ui = owner.tavernUi
           if (!ui || ui.apiVersion < 1) {
             reportHost('tavernui-missing', { got: Boolean(ui) })
-            try { console.warn('[dsh-tavern-comfy] 当前 Tavern 没有 tavernUi 接口，生图按钮不可用') } catch {}
+            try { console.warn('[dsh-tavern-image] 当前 Tavern 没有 tavernUi 接口，生图按钮不可用') } catch {}
             return
           }
           reportHost('tavernui-attached', { apiVersion: ui.apiVersion })
@@ -4431,12 +4443,12 @@ function versionsOf(jobId) {
             }
             try {
               const off = ui.registerPanel({ id: 'character-history', title: '角色历史', render: ({ gameId }) => h(CharacterHistoryPanel, { gameId }) })
-              owner.effect?.(() => off, 'dsh-tavern-comfy: character history panel')
+              owner.effect?.(() => off, 'dsh-tavern-image: character history panel')
             } catch (error) { reportHost('character-history-panel-failed', { error: String(error?.message ?? error).slice(0, 160) }) }
           }
           try {
             const off = ui.registerMessageAction({
-              id: 'rphub-comfy-draw',
+              id: 'dsh-tavern-image-draw',
               label: '🎨 生图',
               when: context => Boolean(context && context.gameId) && Number(context.turn) > 0,
               run: async context => {
@@ -4460,7 +4472,7 @@ function versionsOf(jobId) {
                 }
               },
             })
-            owner.effect?.(() => off, 'dsh-tavern-comfy: message action')
+            owner.effect?.(() => off, 'dsh-tavern-image: message action')
 
           // 正文里的 image###英文Tag### 标记：就地画一张图。
           // 自动配图走的是宿主侧 tavern.attach（Tavern 自己渲染、跟正文版本绑定）；
@@ -4487,16 +4499,18 @@ function versionsOf(jobId) {
                 }
               },
             })
-            owner.effect?.(() => offMarker, 'dsh-tavern-comfy: text marker')
+            owner.effect?.(() => offMarker, 'dsh-tavern-image: text marker')
             reportHost('tavernui-marker-registered', { ok: true })
 
           // 给自己的媒体类型定显示方式：大图 + 点开放大 + 右键/长按改提示词重画
-          try {
-            const offMedia = ui.registerMediaRenderer('dsh-tavern-comfy/image', args => h(OfficialImage, { item: args && args.item }))
-            owner.effect?.(() => offMedia, 'dsh-tavern-comfy: media renderer')
-            reportHost('tavernui-media-registered', { ok: true })
-          } catch (error) {
-            reportHost('tavernui-media-failed', { message: String(error && error.message || error).slice(0, 200) })
+          for (const mediaKind of ['dsh-tavern-image/image', 'dsh-tavern-comfy/image']) {
+            try {
+              const offMedia = ui.registerMediaRenderer(mediaKind, args => h(OfficialImage, { item: args && args.item }))
+              owner.effect?.(() => offMedia, 'dsh-tavern-image: media renderer ' + mediaKind)
+              reportHost('tavernui-media-registered', { ok: true, mediaKind })
+            } catch (error) {
+              reportHost('tavernui-media-failed', { mediaKind, message: String(error && error.message || error).slice(0, 200) })
+            }
           }
           } catch (error) {
             reportHost('tavernui-marker-failed', { message: String(error && error.message || error).slice(0, 200) })
@@ -4506,11 +4520,11 @@ function versionsOf(jobId) {
           }
         })
       } catch (error) {
-        console.warn('[dsh-tavern-comfy] 浏览器半边启动失败:', error?.message)
+        console.warn('[dsh-tavern-image] 浏览器半边启动失败:', error?.message)
       }
     }
 
-    exports.name = 'dsh-tavern-comfy'
+    exports.name = 'dsh-tavern-image'
     exports.inject = ['slots']
     exports.apply = apply
     return module.exports
