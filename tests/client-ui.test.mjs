@@ -4,7 +4,7 @@ import test from 'node:test'
 import vm from 'node:vm'
 
 const source = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
-  .replace('exports.apply = apply', 'exports.apply = apply; exports.__test = { SettingsPanel, OfficialImage }')
+  .replace('exports.apply = apply', 'exports.apply = apply; exports.__test = { SettingsPanel, OfficialImage, createHistoryRequestEpoch, indexedHistoryChanges }')
 const flush = () => new Promise(resolve => setImmediate(resolve))
 const copy = value => JSON.parse(JSON.stringify(value))
 const person = (id, name) => ({ id, name, match: '', note: '', continuity: '', enabled: true, cards: [], outfitRefs: [], traits: { feature: 'gentle', face: 'black hair' }, outfits: [] })
@@ -110,6 +110,35 @@ test('图片说明交由 Tavern 渲染，插件保留 alt 且不重复显示 cap
   const image = ui.api.__test.OfficialImage({ item: { status: 'ready', caption: '[客籍关前验魂灰]', url: '/image.png', data: { jobId: 'j1' } } })
   assert.equal(ui.nodes(image).filter(node => node.type === 'img')[0].props.alt, '[客籍关前验魂灰]')
   assert.equal(ui.text(image), '')
+})
+
+test('history requests become stale as soon as the panel switches games', () => {
+  const ui = harness()
+  const requests = ui.api.__test.createHistoryRequestEpoch()
+  const oldRequest = requests.begin('game-a')
+  const oldRestore = requests.captureGame('game-a')
+  requests.activate('game-b')
+  const currentRequest = requests.begin('game-b')
+  assert.equal(requests.isCurrent('game-a', oldRequest), false)
+  assert.equal(requests.isGameCurrent('game-a', oldRestore), false)
+  assert.equal(requests.isCurrent('game-b', currentRequest), true)
+  requests.invalidate('game-b')
+  assert.equal(requests.isCurrent('game-b', currentRequest), false)
+})
+
+test('history restore rows keep the displayed event paired with its actual snapshot index', () => {
+  const ui = harness()
+  const changes = [
+    { id: 'role-a', field: 'face', turn: 1, at: 10, before: 'black hair', after: 'white hair' },
+    { id: 'role-b', field: 'feature', turn: 2, at: 20, before: 'quiet', after: 'scarred' },
+  ]
+  const rows = ui.api.__test.indexedHistoryChanges(changes)
+  assert.deepEqual(rows.map(row => row.index), [1, 0])
+  assert.deepEqual(rows.map(row => row.change), [changes[1], changes[0]])
+  // These are the exact two values the panel forwards to restore(index, expectedChange).
+  const firstRowPost = { changeIndex: rows[0].index, expectedChange: rows[0].change }
+  assert.equal(firstRowPost.changeIndex, 1)
+  assert.deepEqual(firstRowPost.expectedChange, changes[1])
 })
 
 test('当前角色折叠/展开与切换保留草稿；批量覆盖/追加只作用于所选角色，手动保存才写入', async () => {

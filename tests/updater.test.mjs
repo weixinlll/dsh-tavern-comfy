@@ -109,6 +109,15 @@ test('unrelated origin and nested checkout cannot be updated', async t => {
   assert.equal(status.supported, false); assert.match(status.reason, /独立的 Git/)
 })
 
+test('renamed GitHub repository keeps existing installs on the legacy origin updateable', async t => {
+  const f = await fixture(t)
+  await command(f.root, ['remote', 'set-url', 'origin', 'https://github.com/weixinlll/dsh-tavern-comfy.git'])
+  const status = await f.updater.status()
+  assert.equal(REPOSITORY_URL, 'https://github.com/weixinlll/dsh-tavern-image')
+  assert.equal(status.repositoryUrl, REPOSITORY_URL)
+  assert.equal(status.supported, true)
+})
+
 test('concurrent checks are refused and failed network checks can retry', async t => {
   const f = await fixture(t)
   let release, entered

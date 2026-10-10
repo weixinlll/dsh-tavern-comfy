@@ -1,7 +1,7 @@
 {
   "name": "dsh-tavern-comfy",
-  "version": "1.2.2",
-  "description": "本地 ComfyUI 场景生图：每轮自动出图、图片内联插在正文段落之间、工作流库与人物库自带控制台。",
+  "version": "2.0.0",
+  "description": "DSH Tavern 多平台场景生图：ComfyUI、NovelAI、OpenAI 及兼容渠道，后台配图、人物库与工作流可视化编辑。",
   "type": "module",
   "scripts": {
     "test": "node --test"
@@ -51,11 +51,11 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/weixinlll/dsh-tavern-comfy.git"
+    "url": "https://github.com/weixinlll/dsh-tavern-image.git"
   },
-  "homepage": "https://github.com/weixinlll/dsh-tavern-comfy#readme",
+  "homepage": "https://github.com/weixinlll/dsh-tavern-image#readme",
   "bugs": {
-    "url": "https://github.com/weixinlll/dsh-tavern-comfy/issues"
+    "url": "https://github.com/weixinlll/dsh-tavern-image/issues"
   },
   "author": ""
 }

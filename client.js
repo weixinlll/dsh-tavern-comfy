@@ -37,6 +37,28 @@ const absoluteBase = (() => {
 })()
 const BASE = absoluteBase
 
+function createHistoryRequestEpoch() {
+  let activeGameId = ''
+  let generation = 0
+  let gameGeneration = 0
+  return {
+    activate(gameId) {
+      const next = String(gameId ?? '')
+      if (next !== activeGameId) { activeGameId = next; generation++; gameGeneration++ }
+    },
+    begin(gameId) { this.activate(gameId); return ++generation },
+    isActive(gameId) { return String(gameId ?? '') === activeGameId },
+    isCurrent(gameId, token) { return String(gameId ?? '') === activeGameId && token === generation },
+    captureGame(gameId) { this.activate(gameId); return gameGeneration },
+    isGameCurrent(gameId, token) { return String(gameId ?? '') === activeGameId && token === gameGeneration },
+    invalidate(gameId) { if (String(gameId ?? '') === activeGameId) { generation++; gameGeneration++ } },
+  }
+}
+
+function indexedHistoryChanges(changes) {
+  return (Array.isArray(changes) ? changes : []).map((change, index) => ({ change, index })).reverse()
+}
+
 // 图像查看器的开启函数：由查看器组件挂载时赋值（见下面的 openImageOverlay = ...）。
 // 必须在这里显式声明 —— 它以前是「不带声明的赋值」，靠非严格模式在 window 上造一个
 // 隐式全局变量。一旦 bundle 被包进严格模式，那行赋值会直接 ReferenceError，而周围
@@ -103,8 +125,8 @@ let openImageOverlay = null
       } catch { /* 报告本身绝不能影响功能 */ }
     }
     // 客户端版本戳：重启 DSH 后可以在 /state 的 clientReports 里确认加载的是哪一版
-    const CLIENT_BUILD = 'client-2026-10-08-readable-panel'
-    reportHost('bundle-evaluated', { at: Date.now(), href: String(location?.href ?? '').slice(0, 120), build: CLIENT_BUILD, features: 'character-picker,batch-select,safe-design-save,single-caption,plugin-update,system-option-colors,readable-panel' })
+    const CLIENT_BUILD = 'client-2026-10-09-multi-provider-graph'
+    reportHost('bundle-evaluated', { at: Date.now(), href: String(location?.href ?? '').slice(0, 120), build: CLIENT_BUILD, features: 'character-picker,batch-select,safe-design-save,single-caption,plugin-update,system-option-colors,readable-panel,multi-provider-channels,workflow-graph' })
 
     try {
       window.addEventListener('error', event => {
@@ -189,8 +211,11 @@ let openImageOverlay = null
      * 2026-10-07 加入：/state 正常而 /history 报 Failed to fetch，用重试兜底并上报取证。
      */
     async function jsonFetch(url, init) {
+      // 仅自动重试无副作用的读取请求。POST 等写请求若服务端已执行、但响应丢失，
+      // 重发可能重复扣费或重复创建任务，因此网络错误也必须交给调用者处理。
+      const method = String(init?.method || 'GET').toUpperCase()
+      if (method !== 'GET' && method !== 'HEAD') return jsonFetchOnce(url, init)
       // 三次尝试：原样 → 去掉 cache 选项 → 再去掉 cache 选项（间隔退避）。
-      // 网络层 TypeError（Failed to fetch）通常重试就能过去；HTTP 状态错误（Error）直接抛，不浪费时间。
       const attempts = [{ cache: 'no-store', ...(init ?? {}) }, init ?? undefined, init ?? undefined]
       let lastError
       for (let i = 0; i < attempts.length; i += 1) {
@@ -1276,6 +1301,7 @@ function versionsOf(jobId) {
       const [zoom, setZoom] = React.useState(1)
       const [pos, setPos] = React.useState({ x: 0, y: 0 })
       const [dragging, setDragging] = React.useState(false)
+      const [imageWarning, setImageWarning] = React.useState('')
       const dragRef = React.useRef(null)
       const onWheel = React.useCallback(event => {
         event.preventDefault()
@@ -1313,6 +1339,14 @@ function versionsOf(jobId) {
       const vAt = vTotal ? Math.max(0, Math.min(vTotal - 1, Number(view.versionAt) || 0)) : 0
       // 真正显示的那张：有版本链就用版本链的当前版，否则用主列表的当前张
       const shownId = vTotal ? versions[vAt] : view.jobIds[at]
+      React.useEffect(() => {
+        let alive = true
+        setImageWarning('')
+        if (view.open && shownId) jsonFetch(BASE + '/jobs?id=' + encodeURIComponent(shownId)).then(result => {
+          if (alive) setImageWarning(String(result?.job?.imageOutputWarning || ''))
+        }).catch(() => {})
+        return () => { alive = false }
+      }, [view.open, shownId])
       const go = (delta) => {
         if (total < 2) return
         // 翻整场的时候把版本链清掉，免得两张图的版本串在一起
@@ -1367,6 +1401,7 @@ function versionsOf(jobId) {
           ),
         ),
         view.working ? React.createElement('div', { style: { color: '#9aa3b2', fontSize: '14px', padding: '30px 0', textAlign: 'center' } }, '规划中，通常十几秒…') : null,
+        imageWarning ? React.createElement('div', { role: 'status', style: { color: '#e2b93b', fontSize: '12px', textAlign: 'center', padding: '8px 10px', marginBottom: '8px', background: 'rgba(226,185,59,.1)', borderRadius: '8px' } }, imageWarning) : null,
         React.createElement('div', {
           style: view.jobIds.length > 1
             ? { display: 'flex', flexWrap: 'wrap', gap: '12px', justifyContent: 'center', alignItems: 'flex-start' }
@@ -1550,6 +1585,241 @@ function versionsOf(jobId) {
       badge: (ok) => ({ display: 'inline-block', width: '8px', height: '8px', borderRadius: '50%', background: ok ? '#4ec98a' : '#f2686b', marginRight: '6px' }),
     }
 
+    function WorkflowGraphEditor(props) {
+      const file = String(props?.file || '')
+      const post = props?.post
+      const [raw, setRaw] = React.useState(null)
+      const [revision, setRevision] = React.useState('')
+      const [draft, setDraft] = React.useState({})
+      const [positions, setPositions] = React.useState({})
+      const [selected, setSelected] = React.useState('')
+      const [view, setView] = React.useState({ x: 36, y: 36, scale: 1 })
+      const [busy, setBusy] = React.useState(false)
+      const [error, setError] = React.useState('')
+      const [drag, setDrag] = React.useState(null)
+      const canvasRef = React.useRef(null)
+      const initialPositions = React.useRef({})
+      const nodeWidth = 280
+      const colors = { prompt: '#54c6eb', sampler: '#ec8c42', model: '#b87bec', image: '#59cf8a', decode: '#66a9f5', other: '#d5ac5b' }
+
+      React.useEffect(() => {
+        let alive = true
+        setRaw(null); setError(''); setSelected(''); setDraft({}); setPositions({})
+        Promise.resolve(post('/workflow-graph', { file })).then(result => {
+          if (!alive) return
+          if (!result?.ok || !result?.workflow?.prompt) throw new Error(result?.error || '工作流格式不正确')
+          const workflow = result.workflow
+          const ids = Object.keys(workflow.prompt)
+          const stored = workflow.graphPositions && typeof workflow.graphPositions === 'object' ? workflow.graphPositions : {}
+          const depth = Object.fromEntries(ids.map(id => [id, 0]))
+          const indegree = Object.fromEntries(ids.map(id => [id, 0]))
+          const outgoing = Object.fromEntries(ids.map(id => [id, []]))
+          for (const target of ids) for (const value of Object.values(workflow.prompt[target]?.inputs || {})) {
+            if (Array.isArray(value) && value.length >= 2 && Object.hasOwn(workflow.prompt, String(value[0]))) {
+              const source = String(value[0]); outgoing[source].push(target); indegree[target] += 1
+            }
+          }
+          const queue = ids.filter(id => indegree[id] === 0)
+          for (let cursor = 0; cursor < queue.length; cursor += 1) {
+            const source = queue[cursor]
+            for (const target of outgoing[source]) {
+              depth[target] = Math.max(depth[target], depth[source] + 1)
+              indegree[target] -= 1
+              if (indegree[target] === 0) queue.push(target)
+            }
+          }
+          const maxDepth = Math.max(0, ...Object.values(depth))
+          const layerOrder = {}
+          for (const id of ids) {
+            const layer = indegree[id] > 0 ? maxDepth + 1 + (ids.indexOf(id) % 2) : depth[id]
+            ;(layerOrder[layer] ||= []).push(id)
+          }
+          const layout = {}
+          const defaultPositions = {}
+          for (const [layer, layerIds] of Object.entries(layerOrder)) layerIds.forEach((id, row) => {
+            defaultPositions[id] = { x: 80 + Number(layer) * 370, y: 70 + row * 245 }
+          })
+          ids.forEach(id => {
+            const position = stored[id]
+            layout[id] = position && Number.isFinite(position.x) && Number.isFinite(position.y)
+              ? { x: position.x, y: position.y }
+              : defaultPositions[id]
+          })
+          initialPositions.current = JSON.parse(JSON.stringify(layout))
+          setPositions(layout)
+          setRevision(String(result.revision || ''))
+          setRaw(workflow)
+          setView({ x: 36, y: 36, scale: 1 })
+        }).catch(e => { if (alive) setError('工作流读取失败：' + String(e?.message ?? e)) })
+        return () => { alive = false }
+      }, [file])
+
+      const nodes = raw?.prompt || {}
+      const ids = Object.keys(nodes)
+      const links = []
+      ids.forEach(targetId => Object.entries(nodes[targetId]?.inputs || {}).forEach(([field, value]) => {
+        if (Array.isArray(value) && value.length >= 2 && Object.hasOwn(nodes, String(value[0]))) links.push({ source: String(value[0]), target: targetId, field })
+      }))
+      function nodeColor(classType) {
+        const name = String(classType || '').toLowerCase()
+        if (/clip|text|prompt|conditioning/.test(name)) return colors.prompt
+        if (/sampler|scheduler/.test(name)) return colors.sampler
+        if (/checkpoint|lora|model/.test(name)) return colors.model
+        if (/save|preview|image|latent/.test(name)) return colors.image
+        if (/decode|vae/.test(name)) return colors.decode
+        return colors.other
+      }
+      function inputValue(nodeId, field, value) {
+        const draftValue = draft[nodeId]?.[field]
+        return draftValue === undefined ? String(value ?? '') : String(draftValue)
+      }
+      function isDirty() {
+        if (!raw) return false
+        for (const id of ids) {
+          for (const [field, value] of Object.entries(nodes[id]?.inputs || {})) {
+            if (Array.isArray(value) || (value !== null && typeof value === 'object')) continue
+            const changed = draft[id]?.[field]
+            if (changed !== undefined && String(changed) !== String(value ?? '')) return true
+          }
+          const original = initialPositions.current[id]
+          const current = positions[id]
+          if (original && current && (original.x !== current.x || original.y !== current.y)) return true
+        }
+        return false
+      }
+      function close() {
+        if (busy) return
+        if (isDirty() && !confirm('有未保存的工作流修改，确定关闭吗？')) return
+        props?.onClose?.()
+      }
+      function setField(nodeId, field, value) {
+        if (busy) return
+        setDraft(current => Object.assign({}, current, { [nodeId]: Object.assign({}, current[nodeId], { [field]: value }) }))
+      }
+      function changeZoom(amount) {
+        setView(current => Object.assign({}, current, { scale: Math.max(0.2, Math.min(2.5, current.scale + amount)) }))
+      }
+      function resetView() {
+        setView({ x: 36, y: 36, scale: 1 })
+      }
+      function fitView() {
+        const box = canvasRef.current
+        if (!box || !ids.length) { resetView(); return }
+        const xs = ids.map(id => positions[id]?.x ?? 0), ys = ids.map(id => positions[id]?.y ?? 0)
+        const minX = Math.min(...xs), minY = Math.min(...ys), maxX = Math.max(...xs), maxY = Math.max(...ys)
+        const scale = Math.max(0.2, Math.min(1.4, Math.min((box.clientWidth - 70) / (maxX - minX + nodeWidth + 80), (box.clientHeight - 70) / (maxY - minY + 180))))
+        setView({ x: 35 - minX * scale, y: 35 - minY * scale, scale })
+      }
+      function beginDrag(event, id) {
+        if (busy) return
+        if (event.button !== undefined && event.button !== 0) return
+        event.preventDefault?.()
+        setSelected(id)
+        setDrag({ kind: 'node', id, startX: event.clientX, startY: event.clientY, origin: positions[id] || { x: 0, y: 0 } })
+      }
+      function beginPan(event) {
+        if (event.target !== event.currentTarget || (event.button !== undefined && event.button !== 0)) return
+        setDrag({ kind: 'pan', startX: event.clientX, startY: event.clientY, origin: { x: view.x, y: view.y } })
+      }
+      function movePointer(event) {
+        if (busy || !drag) return
+        const dx = (event.clientX - drag.startX) / (drag.kind === 'node' ? view.scale : 1)
+        const dy = (event.clientY - drag.startY) / (drag.kind === 'node' ? view.scale : 1)
+        if (drag.kind === 'node') setPositions(current => Object.assign({}, current, { [drag.id]: { x: Math.max(-100000, Math.min(100000, drag.origin.x + dx)), y: Math.max(-100000, Math.min(100000, drag.origin.y + dy)) } }))
+        else setView(current => Object.assign({}, current, { x: drag.origin.x + dx, y: drag.origin.y + dy }))
+      }
+      function save() {
+        if (!raw || busy) return
+        const inputs = {}
+        for (const [id, fields] of Object.entries(draft)) {
+          for (const [field, typed] of Object.entries(fields)) {
+            const original = nodes[id]?.inputs?.[field]
+            if (typeof original === 'string') {
+              if (String(typed) !== original) (inputs[id] ||= {})[field] = String(typed)
+            } else if (typeof original === 'number') {
+              if (String(typed).trim() === '') { setError('数字参数不能为空。'); return }
+              const number = Number(typed)
+              if (Number.isFinite(number) && number !== original) (inputs[id] ||= {})[field] = number
+              else if (!Number.isFinite(number)) { setError('请输入有效数字后再保存。'); return }
+            } else if (typeof original === 'boolean') {
+              const bool = typed === true || typed === 'true'
+              if (bool !== original) (inputs[id] ||= {})[field] = bool
+            }
+          }
+        }
+        const moved = {}
+        for (const [id, position] of Object.entries(positions)) {
+          const before = initialPositions.current[id]
+          if (!before || before.x !== position.x || before.y !== position.y) moved[id] = { x: position.x, y: position.y }
+        }
+        setBusy(true); setError('')
+        Promise.resolve(post('/workflow-graph', { file, patch: { inputs, positions: moved }, revision })).then(result => {
+          if (!result?.ok) throw new Error(result?.error || '保存失败')
+          const workflow = result.workflow || raw
+          setRaw(workflow); setRevision(String(result.revision || revision)); setDraft({})
+          initialPositions.current = JSON.parse(JSON.stringify(positions))
+          props?.onSaved?.(workflow)
+        }).catch(e => setError('保存失败：' + String(e?.message ?? e))).finally(() => setBusy(false))
+      }
+      const chosen = nodes[selected]
+      const primitiveFields = chosen ? Object.entries(chosen.inputs || {}).filter(([, value]) => ['string', 'number', 'boolean'].includes(typeof value) || value === null) : []
+      const typeStyle = type => ({ borderLeft: '4px solid ' + nodeColor(type) })
+      const button = { background: '#171e29', color: '#fff', border: '1px solid #718097', borderRadius: '7px', padding: '6px 10px', cursor: 'pointer', fontSize: '12px' }
+      return h('div', { role: 'dialog', 'aria-modal': 'true', 'aria-label': '工作流可视化编辑器', style: { position: 'fixed', inset: 0, zIndex: 2147483200, display: 'flex', flexDirection: 'column', background: '#080d14', color: '#f4f7fb', fontFamily: 'system-ui, sans-serif' } },
+        h('header', { style: { minHeight: '58px', boxSizing: 'border-box', display: 'flex', alignItems: 'center', gap: '10px', padding: '10px 16px', borderBottom: '1px solid #384455', background: '#101722' } },
+          h('strong', { style: { fontSize: '15px', flex: 1 } }, '节点工作流 · ' + file.split(/[\\/]/).pop()),
+          h('span', { role: 'status', style: { color: isDirty() ? '#ffd166' : '#9eacbd', fontSize: '12px' } }, isDirty() ? '● 有未保存修改' : (raw ? ids.length + ' 节点 · ' + links.length + ' 连线' : '读取中…')),
+          h('button', { type: 'button', 'aria-label': '缩小', disabled: busy, style: button, onClick: () => changeZoom(-0.15) }, '−'),
+          h('button', { type: 'button', 'aria-label': '放大', disabled: busy, style: button, onClick: () => changeZoom(0.15) }, '+'),
+          h('button', { type: 'button', 'aria-label': '适配画布', disabled: busy, style: button, onClick: fitView }, '适配'),
+          h('button', { type: 'button', 'aria-label': '重置视图', disabled: busy, style: button, onClick: resetView }, '重置'),
+          h('button', { type: 'button', 'aria-label': '保存工作流图', disabled: !raw || !isDirty() || busy, style: Object.assign({}, button, { background: '#17684d', borderColor: '#4ed4a2', opacity: !raw || !isDirty() || busy ? 0.55 : 1 }), onClick: save }, busy ? '保存中…' : '保存'),
+          h('button', { type: 'button', 'aria-label': '关闭工作流图', disabled: busy, style: Object.assign({}, button, { borderColor: '#b56f78', opacity: busy ? 0.55 : 1 }), onClick: close }, '关闭 ×'),
+        ),
+          h('div', { style: { minHeight: 0, flex: 1, display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(220px, 28vw)' } },
+          h('div', { ref: canvasRef, role: 'application', 'aria-label': '工作流节点画布', onMouseDown: event => { if (!busy) beginPan(event) }, onMouseMove: movePointer, onMouseUp: () => setDrag(null), onMouseLeave: () => setDrag(null), onWheel: event => { event.preventDefault?.(); if (!busy) changeZoom(event.deltaY < 0 ? 0.08 : -0.08) }, style: { position: 'relative', overflow: 'hidden', cursor: drag?.kind === 'pan' ? 'grabbing' : 'grab', backgroundColor: '#0b111a', backgroundImage: 'radial-gradient(#344153 1px, transparent 1px)', backgroundSize: '22px 22px' } },
+            error ? h('div', { role: 'alert', style: { position: 'absolute', zIndex: 4, top: '12px', left: '12px', color: '#ff9a9e', background: '#21141a', border: '1px solid #854650', borderRadius: '7px', padding: '8px 12px', fontSize: '12px' } }, error) : null,
+            raw ? h('div', { style: { position: 'absolute', left: 0, top: 0, transform: 'translate(' + view.x + 'px,' + view.y + 'px) scale(' + view.scale + ')', transformOrigin: '0 0' } },
+              h('svg', { 'aria-hidden': 'true', width: 1, height: 1, style: { position: 'absolute', left: 0, top: 0, overflow: 'visible', pointerEvents: 'none' } },
+                h('defs', null, h('marker', { id: 'workflow-graph-arrow', markerWidth: 8, markerHeight: 8, refX: 6, refY: 3, orient: 'auto', markerUnits: 'strokeWidth' }, h('path', { d: 'M0,0 L0,6 L7,3 z', fill: '#91a8c1' }))),
+                links.map((link, index) => {
+                  const from = positions[link.source] || { x: 0, y: 0 }, to = positions[link.target] || { x: 0, y: 0 }
+                  const x1 = from.x + nodeWidth, y1 = from.y + 56, x2 = to.x, y2 = to.y + 56, curve = Math.max(50, Math.abs(x2 - x1) * 0.45)
+                  return h('path', { key: index, d: 'M ' + x1 + ' ' + y1 + ' C ' + (x1 + curve) + ' ' + y1 + ', ' + (x2 - curve) + ' ' + y2 + ', ' + x2 + ' ' + y2, fill: 'none', stroke: '#91a8c1', strokeWidth: 2.2, opacity: 0.9, markerEnd: 'url(#workflow-graph-arrow)' })
+                })),
+              ids.map((id, index) => {
+                const node = nodes[id], position = positions[id] || { x: 0, y: 0 }, classType = node.class_type || '未知节点'
+                const primitiveCount = Object.values(node.inputs || {}).filter(value => value === null || ['string', 'number', 'boolean'].includes(typeof value)).length
+                return h('div', { key: id, role: 'button', tabIndex: 0, 'aria-label': '节点 ' + id + ' ' + classType, onClick: () => setSelected(id), onKeyDown: event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault?.(); setSelected(id) } }, onMouseDown: event => { if (!busy) beginDrag(event, id) }, onMouseMove: movePointer, onMouseUp: () => setDrag(null), style: { position: 'absolute', left: position.x, top: position.y, width: nodeWidth, boxSizing: 'border-box', border: '1px solid ' + (selected === id ? '#fff' : nodeColor(classType)), borderRadius: '9px', background: '#151e2a', boxShadow: selected === id ? '0 0 0 2px rgba(255,255,255,.28), 0 8px 24px #0009' : '0 6px 18px #0008', overflow: 'hidden', cursor: drag?.id === id ? 'grabbing' : 'grab' } },
+                  h('div', { style: Object.assign({ padding: '9px 11px', background: '#222d3b', fontWeight: 650, fontSize: '12px', display: 'flex', justifyContent: 'space-between', gap: '8px' }, typeStyle(classType)) }, h('span', null, classType), h('span', { style: { color: '#acb9c9', fontWeight: 400 } }, '#' + id)),
+                  h('div', { style: { padding: '8px 11px', color: '#bfccdb', fontSize: '11px', lineHeight: '1.5' } }, primitiveCount ? primitiveCount + ' 个可编辑参数' : '参数由连线提供', node._meta?.title ? h('div', { style: { marginTop: '3px', color: '#97a8ba' } }, node._meta.title) : null),
+                )
+              }),
+            ) : h('div', { style: { padding: '24px', color: '#c1cfdf', fontSize: '13px' } }, error || '正在读取工作流…'),
+          ),
+          h('aside', { style: { overflowY: 'auto', borderLeft: '1px solid #384455', background: '#101722', padding: '16px', color: '#f4f7fb' } },
+            h('div', { style: { fontSize: '13px', fontWeight: 700, marginBottom: '12px' } }, chosen ? '节点检查器' : '选择一个节点'),
+            chosen ? h('div', null,
+              h('div', { style: { padding: '10px', borderRadius: '8px', background: '#192331', borderLeft: '4px solid ' + nodeColor(chosen.class_type), marginBottom: '12px' } },
+                h('div', { style: { fontSize: '13px', fontWeight: 650 } }, chosen._meta?.title || chosen.class_type || '未知节点'),
+                h('div', { style: { fontSize: '11px', color: '#b8c5d3', marginTop: '4px' } }, '节点 #' + selected + ' · ' + Object.keys(chosen.inputs || {}).length + ' 个输入')),
+              h('div', { style: { fontSize: '11px', lineHeight: 1.5, color: '#f0cc84', background: '#282116', padding: '8px', borderRadius: '7px', marginBottom: '12px' } }, '提示：绑定的正面、负面、种子和尺寸会被生成设置覆盖。'),
+              primitiveFields.length ? primitiveFields.map(([field, value]) => h('label', { key: field, style: { display: 'block', margin: '0 0 12px', fontSize: '11px', color: '#d4deea' } },
+                h('span', { style: { display: 'block', marginBottom: '5px', color: '#b8c5d3' } }, field + ' · ' + (typeof value === 'boolean' ? '布尔' : typeof value === 'number' ? '数字' : '文本')),
+                value === null ? h('div', { style: { color: '#9eacbd', fontStyle: 'italic' } }, '空值（只读）') : typeof value === 'boolean'
+                  ? h('input', { type: 'checkbox', disabled: busy, 'aria-label': field, checked: draft[selected]?.[field] === undefined ? value : (draft[selected][field] === true || draft[selected][field] === 'true'), onChange: event => setField(selected, field, event.target.checked) })
+                  : h(typeof value === 'string' && value.length > 100 ? 'textarea' : 'input', { type: typeof value === 'number' ? 'number' : 'text', disabled: busy, 'aria-label': field, value: inputValue(selected, field, value), onChange: event => setField(selected, field, event.target.value), style: { width: '100%', boxSizing: 'border-box', padding: '8px', borderRadius: '6px', border: '1px solid #66778d', background: busy ? '#151b24' : '#0c121b', color: '#fff', fontSize: '12px', minHeight: typeof value === 'string' && value.length > 100 ? '84px' : '34px' } }),
+              )) : h('div', { style: { color: '#b8c5d3', fontSize: '12px' } }, '此节点没有可编辑的普通参数。'),
+              h('div', { style: { borderTop: '1px solid #384455', paddingTop: '12px', marginTop: '10px', fontSize: '11px', color: '#b8c5d3' } },
+                '已有连线（只读）',
+                links.filter(link => link.target === selected || link.source === selected).map((link, i) => h('div', { key: i, style: { marginTop: '6px', color: '#d7e2ee' } }, link.source + ' → ' + link.target + ' · ' + link.field))),
+            ) : h('div', { style: { color: '#b8c5d3', fontSize: '12px', lineHeight: 1.6 } }, '点选画布中的节点查看参数。可拖动节点调整布局，滚轮缩放，拖动画布空白处平移。'),
+            error ? h('div', { role: 'alert', style: { color: '#ff9a9e', fontSize: '12px', marginTop: '12px' } }, error) : null,
+          ),
+        ),
+      )
+    }
+
     function SettingsPanel() {
       const [data, setDataState] = React.useState(null)
       // 让定时器/异步回调读到"最新的" data，而不用把它写进 effect 依赖
@@ -1642,17 +1912,26 @@ function versionsOf(jobId) {
       const [wbNote, setWbNote] = React.useState('')
       // 工作流：展开哪张 / 它的详情 / 导入面板 / ComfyUI 已装的 LoRA
       const [wfOpen, setWfOpen] = React.useState('')
+      const [wfGraphFile, setWfGraphFile] = React.useState('')
       const [wfDetail, setWfDetail] = React.useState(null)
       const [wfImportOpen, setWfImportOpen] = React.useState(false)
       const [wfPaste, setWfPaste] = React.useState('')
       const [wfNote, setWfNote] = React.useState('')
       const [loraList, setLoraList] = React.useState([])
+      const [simpleInfo, setSimpleInfo] = React.useState(null)
+      const [simpleLoading, setSimpleLoading] = React.useState(false)
+      const [simpleNote, setSimpleNote] = React.useState('')
+      const [simpleConfigDraft, setSimpleConfigDraft] = React.useState(null)
       // 可选的 provider / model（从 DSH 的 llm 服务拉）
       const [llmProviders, setLlmProviders] = React.useState([])
       const [llmModels, setLlmModels] = React.useState({})     // provider → [{id,name,vision}]
       const [llmReasoning, setLlmReasoning] = React.useState({}) // provider/model → {efforts,defaultEffort}
       const [llmNote, setLlmNote] = React.useState('')
       const [comfyStatus, setComfyStatus] = React.useState(null)
+      // API secrets stay in local input drafts; /state returns only hasApiKey/hasPassword flags.
+      const [channelSecretDrafts, setChannelSecretDrafts] = React.useState({})
+      const [channelTestStatuses, setChannelTestStatuses] = React.useState({})
+      const channelDraftRevisions = React.useRef({})
       const [wfTestNote, setWfTestNote] = React.useState('')
       const [wfTestJob, setWfTestJob] = React.useState('')
       const [wfNoop, setWfNoop] = React.useState(false)
@@ -1676,7 +1955,8 @@ function versionsOf(jobId) {
       React.useEffect(() => { refresh() }, [])
       React.useEffect(() => { loadProviders() }, [])
       // 等 /state 到位再测 ComfyUI：那时才拿得到 comfyUrl，也避开首次渲染的 config TDZ
-      React.useEffect(() => { if (data) loadComfyStatus() }, [Boolean(data)])
+      React.useEffect(() => { if (data?.config?.imageBackend === 'comfyui') loadComfyStatus() }, [data?.config?.imageBackend])
+      const channelTestsInFlight = React.useRef({})
       React.useEffect(() => {
         const view = ++pluginUpdateView.current
         if (tab === 'plugin-update' && !pluginUpdateLocalAttempted.current) {
@@ -1832,7 +2112,8 @@ function versionsOf(jobId) {
           const r = await post('/config', { config: patch })
           receiveState(r.state, revision)
           setNote('已保存')
-        } catch (e) { setNote('保存失败：' + (e && e.message ? e.message : e)) }
+          return r
+        } catch (e) { setNote('保存失败：' + (e && e.message ? e.message : e)); return null }
       }
 
       if (!data) return h('div', { style: Object.assign({}, S.surface, { padding: '18px', fontSize: '13px' }) }, note || '正在读取…')
@@ -1842,23 +2123,32 @@ function versionsOf(jobId) {
 
       // ---- 顶部状态 ----
       // ---- 顶部状态 ----
-      const comfyOnline = Boolean(data.comfy && data.comfy.ok)
+      const imageBackend = String(config.imageBackend || 'comfyui')
+      const providers = Array.isArray(data.imageProviders) ? data.imageProviders : []
+      const selectedChannel = (Array.isArray(config.imageChannels) ? config.imageChannels : []).find(channel => channel.id === config.activeImageChannel && channel.provider === imageBackend)
+      const comfyOnline = imageBackend === 'comfyui' && Boolean(data.comfy && data.comfy.ok)
+      const externalStatus = selectedChannel ? channelTestStatuses[selectedChannel.id] : null
+      const externalConnected = Boolean(externalStatus?.ok && externalStatus.status === 'reachable')
+      const backendLabel = imageBackend === 'comfyui'
+        ? 'ComfyUI'
+        : ((providers.find(item => item.id === imageBackend) || {}).label || imageBackend)
       const head = h('div', { style: S.card },
         h('div', { style: { fontSize: '14px', fontWeight: 600, marginBottom: '6px', display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } },
-          h('span', { style: S.badge(comfyOnline) }),
-          h('span', null, comfyOnline
-            ? ('ComfyUI 在线' + (data.comfy.version ? ' ' + data.comfy.version : '') + (data.comfy.device ? '　' + data.comfy.device : ''))
-            : ('ComfyUI 没开' + (data.comfy && data.comfy.error ? '：' + data.comfy.error : ''))),
-          h('button', {
+          h('span', { style: imageBackend === 'comfyui' ? S.badge(comfyOnline) : Object.assign({}, S.badge(externalConnected), (!externalStatus || externalStatus.status === 'configured') ? { background: '#8491a2' } : {}) }),
+          h('span', null, imageBackend === 'comfyui'
+            ? (comfyOnline ? ('ComfyUI 在线' + (data.comfy.version ? ' ' + data.comfy.version : '') + (data.comfy.device ? '　' + data.comfy.device : '')) : ('ComfyUI 没开' + (data.comfy && data.comfy.error ? '：' + data.comfy.error : '')))
+            : (backendLabel + (selectedChannel ? ' · ' + selectedChannel.name : ' · 尚未选择渠道') + (externalStatus?.checking ? ' · 检测中…' : externalConnected ? ' · 连接可用' : externalStatus?.status === 'configured' ? ' · 已配置，尚未验证' : externalStatus ? ' · 连接失败' : selectedChannel ? ' · 已配置，尚未验证' : ''))),
+          imageBackend === 'comfyui' ? h('button', {
             style: { fontSize: '11px', padding: '3px 10px', borderRadius: '7px', border: '1px solid rgba(150,170,200,.45)', background: 'transparent', color: '#9aa3b2', cursor: 'pointer' },
             onClick: loadComfyStatus,
-          }, comfyStatus?.checking ? '检测中…' : '测试连接'),
-          comfyStatus && !comfyStatus.checking ? h('span', { style: { fontSize: '11px', color: comfyStatus.ok ? '#8bd48b' : '#f2686b' } },
+          }, comfyStatus?.checking ? '检测中…' : '测试连接') : null,
+          imageBackend === 'comfyui' && comfyStatus && !comfyStatus.checking ? h('span', { style: { fontSize: '11px', color: comfyStatus.ok ? '#8bd48b' : '#f2686b' } },
             comfyStatus.ok ? ('✓ ' + (comfyStatus.ms || 0) + 'ms') : ('✗ ' + String(comfyStatus.error || '').slice(0, 60))) : null,
         ),
-        h('div', { style: { fontSize: '12px', color: '#9aa3b2' } },
-          '当前画风：' + ((workflows.find(w => w.id === config.defaultWorkflow) || {}).label || '（没选）'),
-        ),
+        imageBackend === 'comfyui' ? h('div', { style: { fontSize: '12px', color: '#9aa3b2' } },
+          '当前画风：' + (config.comfyMode === 'simple'
+            ? ('简单模式 · ' + ({ checkpoint: 'Checkpoint（SD / SDXL）', flux: 'Flux', anima: 'Anima' }[config.comfySimple?.template] || 'Checkpoint') + ' · ' + (config.comfySimple?.template === 'checkpoint' ? (config.comfySimple?.checkpoint || '未选模型') : (config.comfySimple?.unet || '未选模型')))
+            : ((workflows.find(w => w.id === config.defaultWorkflow) || {}).label || '（没选）'))) : null,
         h('div', { style: { fontSize: '12px', color: '#9aa3b2', marginTop: '4px' } },
           config.plannerEnabled ? ('规划模型：' + effective.provider + ' / ' + effective.model + (effective.fromTavern ? '（跟随 Tavern）' : '')) : '（规划已关）',
         ),
@@ -1924,12 +2214,54 @@ function versionsOf(jobId) {
       /** 生图后端（ComfyUI 地址与鉴权）—— 标签在上、控件全宽。 */
       function ComfyBackendCard() {
         const optStyle = { color: '#12161c', background: '#e9eef6' }
-        const authMode = String(config.comfyAuthMode ?? 'none')
-        const full = (extra) => Object.assign({}, S.input, { width: '100%', boxSizing: 'border-box' }, extra || {})
+        const providerOptions = providers.length ? providers : [
+          ['novelai', 'NovelAI'], ['openai', 'OpenAI 兼容'], ['gemini', 'Gemini'], ['gemini-chat', 'Gemini Chat'],
+          ['grok', 'Grok'], ['seedream', 'Seedream'], ['qwen', 'Qwen'], ['sdwebui', 'Stable Diffusion WebUI'],
+        ].map(([id, label]) => ({ id, label }))
+        const backend = imageBackend
+        const channels = Array.isArray(config.imageChannels) ? config.imageChannels : []
+        const channel = selectedChannel
+        const channelDraft = channel ? (channelSecretDrafts[channel.id] || { apiKey: '', password: '' }) : { apiKey: '', password: '' }
+        const localFields = channel ? (channelDraft.fields || channel) : {}
+        const full = (extra) => Object.assign({}, S.input, { width: '100%', boxSizing: 'border-box', colorScheme: 'dark' }, extra || {})
         const label = (text, hint) => h('div', { style: { fontSize: '12px', color: '#9aa3b2', marginBottom: '5px' } },
           text, hint ? h('span', { style: { color: '#9aa3b2', marginLeft: '6px' } }, hint) : null)
         const setCfg = (patch) => setData(Object.assign({}, data, { config: Object.assign({}, config, patch) }))
-        const saveAll = () => save({
+        const nextId = (provider) => provider + '-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7)
+        const defaultChannel = provider => {
+          const preset = providerOptions.find(item => item.id === provider) || {}
+          return { id: nextId(provider), name: (preset.label || provider) + ' 渠道', provider, baseUrl: preset.baseUrl || '', model: preset.model || '', authMode: 'bearer', username: '', options: {}, hasApiKey: false, hasPassword: false }
+        }
+        const persistChannelSelection = (nextChannels, provider, activeId) => {
+          setCfg({ imageChannels: nextChannels, imageBackend: provider, activeImageChannel: activeId })
+          save({ imageChannels: nextChannels, imageBackend: provider, activeImageChannel: activeId })
+        }
+        const editChannel = patch => {
+          if (!channel) return
+          const next = Object.assign({}, localFields, patch)
+          setChannelSecretDrafts(current => Object.assign({}, current, { [channel.id]: Object.assign({}, current[channel.id], { fields: next }) }))
+          channelDraftRevisions.current[channel.id] = (channelDraftRevisions.current[channel.id] || 0) + 1
+          setChannelTestStatuses(current => { const statuses = Object.assign({}, current); delete statuses[channel.id]; return statuses })
+        }
+        const markSecretEdited = id => {
+          channelDraftRevisions.current[id] = (channelDraftRevisions.current[id] || 0) + 1
+          setChannelTestStatuses(current => { const statuses = Object.assign({}, current); delete statuses[id]; return statuses })
+        }
+        const updateOption = (key, value) => editChannel({ options: Object.assign({}, localFields.options || {}, { [key]: value }) })
+        const field = (fieldName, caption, placeholder, type = 'text') => h('div', { style: { marginBottom: '10px' } },
+          label(caption), h('input', { 'aria-label': caption, type, value: String(localFields[fieldName] ?? ''), placeholder: placeholder || '', style: full(), onChange: e => editChannel({ [fieldName]: e.target.value }) }))
+        const optionField = (key, caption, placeholder, type = 'text') => h('div', { style: { marginBottom: '10px' } },
+          label(caption), h('input', { 'aria-label': caption, type, value: String((localFields.options || {})[key] ?? ''), placeholder: placeholder || '', style: full(), onChange: e => updateOption(key, type === 'number' ? Number(e.target.value) : e.target.value) }))
+        const modelSuggestions = channel ? [...new Set([
+          providers.find(item => item.id === backend)?.model,
+          ...(channelTestStatuses[channel.id]?.models || []),
+        ].filter(Boolean).map(String))] : []
+        const modelInput = channel ? h('div', { style: { marginBottom: '10px' } },
+          label('模型'), h('input', { 'aria-label': '模型', list: 'image-models-' + channel.id, type: 'text', value: String(localFields.model ?? ''), placeholder: '选择建议模型或填写自定义模型 ID', style: full(), onChange: e => editChannel({ model: e.target.value }) }),
+          modelSuggestions.length ? h('datalist', { id: 'image-models-' + channel.id }, modelSuggestions.map(model => h('option', { key: model, value: model }))) : null) : null
+        const generatePathPlaceholder = ({ novelai: '/ai/generate-image', openai: '/images/generations', 'gemini-chat': '/chat/completions', grok: '/images/generations', seedream: '/images/generations', qwen: '/services/aigc/multimodal-generation/generation', sdwebui: '/sdapi/v1/txt2img' })[backend]
+        const authMode = String(config.comfyAuthMode ?? 'none')
+        const saveComfy = () => save({
           comfyUrl: config.comfyUrl || '', comfyAuthMode: authMode,
           comfyAuthToken: config.comfyAuthToken || '', comfyAuthUser: config.comfyAuthUser || '', comfyAuthPass: config.comfyAuthPass || '',
         })
@@ -1937,58 +2269,115 @@ function versionsOf(jobId) {
           h('div', { style: { fontSize: '13px', marginBottom: '10px' } }, '生图后端'),
           h('div', { style: { marginBottom: '12px' } },
             label('提供商'),
-            h('select', { value: 'comfyui', style: full(), onChange: () => {} },
+            h('select', { 'aria-label': '生图提供商', value: backend, style: full(), onChange: e => {
+              const provider = e.target.value
+              if (provider === 'comfyui') { save({ imageBackend: provider }); setCfg({ imageBackend: provider }); return }
+              let selected = channels.find(item => item.provider === provider)
+              let next = channels
+              if (!selected) { selected = defaultChannel(provider); next = channels.concat(selected) }
+              persistChannelSelection(next, provider, selected.id)
+            } },
               h('option', { value: 'comfyui', style: optStyle }, 'ComfyUI'),
+              providerOptions.map(item => h('option', { key: item.id, value: item.id, style: optStyle }, item.label + (item.id !== item.label ? '（' + item.id + '）' : ''))),
             ),
           ),
-          h('div', { style: { marginBottom: '12px' } },
-            label('API 根地址'),
-            h('input', {
-              type: 'text', value: config.comfyUrl || '', placeholder: 'http://127.0.0.1:8188',
-              style: full(),
-              onChange: e => setCfg({ comfyUrl: e.target.value }),
-            }),
-          ),
-          h('div', { style: { marginBottom: '12px' } },
-            label('服务鉴权'),
-            h('select', {
-              value: authMode, style: full(),
-              onChange: e => { const v = e.target.value; setCfg({ comfyAuthMode: v }); save({ comfyAuthMode: v }) },
-            },
-              h('option', { value: 'none', style: optStyle }, '无需鉴权'),
-              h('option', { value: 'bearer', style: optStyle }, 'Bearer Token'),
-              h('option', { value: 'basic', style: optStyle }, 'Basic（用户名 / 密码）'),
+          backend === 'comfyui' ? h('div', null,
+            h('div', { style: { marginBottom: '12px' } },
+              label('API 根地址'),
+              h('input', { type: 'text', value: config.comfyUrl || '', placeholder: 'http://127.0.0.1:8188', style: full(), onChange: e => setCfg({ comfyUrl: e.target.value }) }),
             ),
-          ),
-          authMode === 'bearer' ? h('div', { style: { marginBottom: '12px' } },
-            label('Token'),
-            h('input', { type: 'password', value: config.comfyAuthToken || '', placeholder: '粘贴 token', style: full(), onChange: e => setCfg({ comfyAuthToken: e.target.value }) }),
-          ) : null,
-          authMode === 'basic' ? h('div', { style: { marginBottom: '12px' } },
-            label('用户名'),
-            h('input', { type: 'text', value: config.comfyAuthUser || '', style: Object.assign(full(), { marginBottom: '8px' }), onChange: e => setCfg({ comfyAuthUser: e.target.value }) }),
-            label('密码'),
-            h('input', { type: 'password', value: config.comfyAuthPass || '', style: full(), onChange: e => setCfg({ comfyAuthPass: e.target.value }) }),
-          ) : null,
-          h('div', { style: { display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' } },
-            h('button', {
-              style: Object.assign({}, buttonStyle, { fontWeight: 600 }),
-              onClick: async () => {
-                await saveAll()
-                setComfyStatus({ checking: true })
-                const r = await post('/comfy-test', {
-                  url: config.comfyUrl || '', authMode, authToken: config.comfyAuthToken || '',
-                  authUser: config.comfyAuthUser || '', authPass: config.comfyAuthPass || '',
-                }).catch(e => ({ ok: false, error: String(e?.message ?? e) }))
-                setComfyStatus(r)
-              },
-            }, comfyStatus?.checking ? '测试中…' : '测试连接与鉴权'),
-            comfyStatus?.checking ? h('span', { style: { fontSize: '12px', color: '#9aa3b2' } }, '正在连接…') : null,
-            comfyStatus && !comfyStatus.checking ? h('span', { style: { fontSize: '12px', color: comfyStatus.ok ? '#8bd48b' : '#f2686b' } },
-              comfyStatus.ok
-                ? ('● 在线' + (comfyStatus.version ? ' ' + comfyStatus.version : '') + (comfyStatus.device ? '　' + comfyStatus.device : '') + (comfyStatus.vram ? '　' + comfyStatus.vram : '') + '　✓ ' + (comfyStatus.ms || 0) + 'ms')
-                : ('● 离线：' + String(comfyStatus.error || '未知原因'))) : null,
-          ),
+            h('div', { style: { marginBottom: '12px' } },
+              label('服务鉴权'),
+              h('select', { value: authMode, style: full(), onChange: e => { const v = e.target.value; setCfg({ comfyAuthMode: v }); save({ comfyAuthMode: v }) } },
+                h('option', { value: 'none', style: optStyle }, '无需鉴权'), h('option', { value: 'bearer', style: optStyle }, 'Bearer Token'), h('option', { value: 'basic', style: optStyle }, 'Basic（用户名 / 密码）')),
+            ),
+            authMode === 'bearer' ? h('div', { style: { marginBottom: '12px' } }, label('Token'), h('input', { type: 'password', value: config.comfyAuthToken || '', placeholder: '粘贴 token', style: full(), onChange: e => setCfg({ comfyAuthToken: e.target.value }) })) : null,
+            authMode === 'basic' ? h('div', { style: { marginBottom: '12px' } },
+              label('用户名'), h('input', { type: 'text', value: config.comfyAuthUser || '', style: Object.assign(full(), { marginBottom: '8px' }), onChange: e => setCfg({ comfyAuthUser: e.target.value }) }),
+              label('密码'), h('input', { type: 'password', value: config.comfyAuthPass || '', style: full(), onChange: e => setCfg({ comfyAuthPass: e.target.value }) })) : null,
+            h('button', { style: Object.assign({}, buttonStyle, { fontWeight: 600 }), onClick: async () => {
+              await saveComfy(); setComfyStatus({ checking: true })
+              const r = await post('/comfy-test', { url: config.comfyUrl || '', authMode, authToken: config.comfyAuthToken || '', authUser: config.comfyAuthUser || '', authPass: config.comfyAuthPass || '' }).catch(e => ({ ok: false, error: String(e?.message ?? e) }))
+              setComfyStatus(r)
+            } }, comfyStatus?.checking ? '测试中…' : '测试连接与鉴权'),
+            comfyStatus?.checking ? h('span', { style: { fontSize: '12px', color: '#9aa3b2', marginLeft: '10px' } }, '正在连接…') : null,
+            comfyStatus && !comfyStatus.checking ? h('span', { style: { fontSize: '12px', color: comfyStatus.ok ? '#8bd48b' : '#f2686b', marginLeft: '10px' } }, comfyStatus.ok ? ('● 在线' + (comfyStatus.version ? ' ' + comfyStatus.version : '') + (comfyStatus.device ? '　' + comfyStatus.device : '') + (comfyStatus.vram ? '　' + comfyStatus.vram : '') + '　✓ ' + (comfyStatus.ms || 0) + 'ms') : ('● 离线：' + String(comfyStatus.error || '未知原因'))) : null,
+          ) : channel ? h('div', null,
+            h('div', { style: S.row },
+              h('select', { 'aria-label': '生图渠道', value: channel.id, style: Object.assign({}, full(), { flex: 1, minWidth: '180px' }), onChange: e => { setCfg({ activeImageChannel: e.target.value }); save({ activeImageChannel: e.target.value }) } },
+                channels.filter(item => item.provider === backend).map(item => h('option', { key: item.id, value: item.id, style: optStyle }, item.name))),
+              h('button', { style: buttonStyle, onClick: () => { const created = defaultChannel(backend); persistChannelSelection(channels.concat(created), backend, created.id) } }, '新增渠道'),
+              h('button', { style: buttonStyle, onClick: () => { const created = Object.assign({}, channel, localFields, { id: nextId(backend), name: localFields.name + ' 副本', hasApiKey: false, hasPassword: false }); delete created.apiKey; delete created.password; persistChannelSelection(channels.concat(created), backend, created.id) } }, '复制渠道'),
+              h('button', { style: Object.assign({}, buttonStyle, { color: '#f28b8b' }), onClick: () => {
+                if (!confirm('删除渠道「' + channel.name + '」？已保存的密钥也会删除。')) return
+                const next = channels.filter(item => item.id !== channel.id)
+                const fallback = next.find(item => item.provider === backend)
+                if (fallback) persistChannelSelection(next, backend, fallback.id)
+                else { setChannelSecretDrafts(current => { const drafts = Object.assign({}, current); delete drafts[channel.id]; return drafts }); persistChannelSelection(next, 'comfyui', '') }
+              } }, '删除渠道'),
+            ),
+            field('name', '渠道名称', '例如：个人 API / 公司中转'),
+            field('baseUrl', 'API 根地址', 'https://api.example.com/v1'),
+            modelInput,
+            h('div', { style: { marginBottom: '10px' } }, label('鉴权方式'), h('select', { 'aria-label': '鉴权方式', value: localFields.authMode || 'bearer', style: full(), onChange: e => editChannel({ authMode: e.target.value }) },
+              h('option', { value: 'bearer', style: optStyle }, 'Bearer API Key'), h('option', { value: 'none', style: optStyle }, '无需鉴权'), h('option', { value: 'basic', style: optStyle }, 'Basic 用户名 / 密码'))),
+            localFields.authMode === 'basic' ? h('div', null,
+              field('username', '用户名', '用户名'),
+              h('div', { style: { marginBottom: '10px' } }, label('密码', channel.hasPassword ? '已保存；留空保留原密码' : ''),
+                h('input', { 'aria-label': '渠道密码', type: 'password', value: channelDraft.password || '', placeholder: channel.hasPassword ? '已保存，留空可保留' : '输入密码', style: full(), onChange: e => { setChannelSecretDrafts(current => Object.assign({}, current, { [channel.id]: Object.assign({}, current[channel.id], { password: e.target.value, clearPassword: false }) })); markSecretEdited(channel.id) } }),
+                channel.hasPassword ? h('button', { style: buttonStyle, onClick: () => { setChannelSecretDrafts(current => Object.assign({}, current, { [channel.id]: Object.assign({}, current[channel.id], { clearPassword: true, password: '' }) })); markSecretEdited(channel.id) } }, '清除已保存密码') : null)) : null,
+            localFields.authMode !== 'none' && localFields.authMode !== 'basic' ? h('div', { style: { marginBottom: '10px' } },
+              label('API Key', channel.hasApiKey ? '已保存；留空保留原 Key' : ''),
+              h('input', { 'aria-label': '渠道 API Key', type: 'password', value: channelDraft.apiKey || '', placeholder: channel.hasApiKey ? '已保存，留空可保留' : '粘贴 API Key', style: full(), onChange: e => { setChannelSecretDrafts(current => Object.assign({}, current, { [channel.id]: Object.assign({}, current[channel.id], { apiKey: e.target.value, clearApiKey: false }) })); markSecretEdited(channel.id) } }),
+              channel.hasApiKey ? h('button', { style: buttonStyle, onClick: () => { setChannelSecretDrafts(current => Object.assign({}, current, { [channel.id]: Object.assign({}, current[channel.id], { clearApiKey: true, apiKey: '' }) })); markSecretEdited(channel.id) } }, '清除已保存 Key') : null) : null,
+            ['novelai', 'sdwebui'].includes(backend) ? h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(120px,1fr))', gap: '8px' } },
+              optionField('steps', '步数', backend === 'novelai' ? '28' : '20', 'number'), optionField('cfg', 'CFG', backend === 'novelai' ? '5' : '7', 'number'), optionField('sampler', '采样器', backend === 'novelai' ? 'k_euler_ancestral' : 'Euler a')) : null,
+            backend === 'novelai' ? optionField('noiseSchedule', 'Noise schedule', 'karras') : null,
+            backend === 'openai' ? optionField('quality', '质量', 'auto') : null,
+            ['openai', 'novelai', 'sdwebui', 'qwen'].includes(backend) ? optionField('size', '尺寸覆盖（可选）', '例如：1024x1536') : null,
+            backend === 'seedream' ? optionField('size', '输出尺寸（可选）', '1K、1.5K、2K 或 2048x2048') : null,
+            backend === 'gemini' ? optionField('imageSize', '输出分辨率（可选）', '1K、2K 或 4K') : null,
+            ['gemini', 'novelai', 'sdwebui', 'qwen'].includes(backend) ? optionField('aspectRatio', '画面比例覆盖（可选）', '例如：2:3') : null,
+            generatePathPlaceholder ? optionField('generatePath', '生成接口路径（高级）', generatePathPlaceholder) : null,
+            h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap', marginTop: '12px' } },
+              h('button', { style: Object.assign({}, buttonStyle, { fontWeight: 600 }), disabled: Boolean(channelTestsInFlight.current[channel.id]), onClick: async () => {
+                if (channelTestsInFlight.current[channel.id]) return
+                channelTestsInFlight.current[channel.id] = true
+                const editRevision = channelDraftRevisions.current[channel.id] || 0
+                const secrets = channelSecretDrafts[channel.id] || {}
+                const payload = Object.assign({}, localFields, { id: channel.id, provider: backend,
+                  ...(secrets.apiKey ? { apiKey: secrets.apiKey } : {}), ...(secrets.password ? { password: secrets.password } : {}),
+                  ...(secrets.clearApiKey ? { clearApiKey: true } : {}), ...(secrets.clearPassword ? { clearPassword: true } : {}),
+                })
+                const nextChannels = channels.map(item => item.id === channel.id ? payload : item)
+                if (!nextChannels.some(item => item.id === channel.id)) nextChannels.push(payload)
+                try {
+                  const saved = await save({ imageBackend: backend, activeImageChannel: channel.id, imageChannels: nextChannels })
+                  if (!saved) return
+                  setChannelSecretDrafts(current => {
+                    const latest = current[channel.id] || {}
+                    const cleaned = Object.assign({}, latest)
+                    if (latest.apiKey === secrets.apiKey) { cleaned.apiKey = ''; delete cleaned.clearApiKey }
+                    if (latest.password === secrets.password) { cleaned.password = ''; delete cleaned.clearPassword }
+                    return Object.assign({}, current, { [channel.id]: cleaned })
+                  })
+                  setChannelTestStatuses(current => Object.assign({}, current, { [channel.id]: { checking: true } }))
+                  const result = await post('/image-channel-test', { id: channel.id }).catch(error => ({ ok: false, status: 0, message: String(error?.message ?? error) }))
+                  if ((channelDraftRevisions.current[channel.id] || 0) === editRevision) setChannelTestStatuses(current => Object.assign({}, current, { [channel.id]: result }))
+                  else setChannelTestStatuses(current => { const statuses = Object.assign({}, current); delete statuses[channel.id]; return statuses })
+                } finally { delete channelTestsInFlight.current[channel.id] }
+              } }, channelTestStatuses[channel.id]?.checking ? '测试中…' : '保存并测试连接'),
+              h('span', { role: 'status', 'aria-live': 'polite', style: { fontSize: '12px', color: channelTestStatuses[channel.id]?.status === 'reachable' && channelTestStatuses[channel.id]?.ok ? '#8bd48b' : channelTestStatuses[channel.id]?.status === 'configured' ? '#9aa3b2' : channelTestStatuses[channel.id] ? '#f2686b' : '#9aa3b2' } },
+                channelTestStatuses[channel.id]?.checking ? '正在探测渠道…' : channelTestStatuses[channel.id]?.status === 'reachable' && channelTestStatuses[channel.id]?.ok ? ('连接可用' + (channelTestStatuses[channel.id].message ? '：' + channelTestStatuses[channel.id].message : '')) : channelTestStatuses[channel.id]?.status === 'configured' ? ('已配置，尚未验证：' + (channelTestStatuses[channel.id].message || '此服务没有可安全探测的接口。')) : channelTestStatuses[channel.id] ? ('无法连接：' + (channelTestStatuses[channel.id].message || channelTestStatuses[channel.id].error || '检查地址与鉴权')) : (channel.hasApiKey || channel.hasPassword ? '已配置，尚未验证' : '填写地址和鉴权后保存并测试')),
+            ),
+            h('div', { style: { fontSize: '11px', color: '#9aa3b2', marginTop: '8px', lineHeight: 1.55 } },
+              backend === 'novelai' ? 'NovelAI 使用 API Key，不需要账户 OAuth 登录；密钥可从官方账户获取。' : backend === 'openai' ? '支持 OpenAI 图片 API 和兼容中转；建议模型 ID 来自服务端模型列表，兼容中转可修改生成路径。' : backend === 'grok' ? 'Grok 当前由服务端模型决定尺寸和比例；插件不会发送尺寸覆盖参数。' : backend === 'qwen' ? '百炼 API 根地址必须匹配账号所在地域和控制台提供的工作空间地址；请从平台控制台复制完整区域端点。' : '可填写服务商或自建中转的完整 API 根地址；测试只检查连接与模型信息，不会付费生成图片。复制渠道会复制参数，但需要重新填写密钥。'),
+            h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px', marginTop: '10px', flexWrap: 'wrap' } },
+              h('label', { style: { fontSize: '12px', color: '#b2bdcc' } }, '同时生成', h('input', { 'aria-label': '同时生成', type: 'number', min: 1, max: 4, value: Number(config.imageConcurrency || 2), style: Object.assign({}, S.input, { width: '70px', marginLeft: '8px' }), onChange: e => setCfg({ imageConcurrency: Math.max(1, Math.min(4, Number(e.target.value) || 1)) }) })),
+              h('button', { style: buttonStyle, onClick: () => save({ imageConcurrency: Math.max(1, Math.min(4, Number(config.imageConcurrency || 2))) }) }, '保存并发设置'),
+              h('span', { style: { fontSize: '11px', color: '#9aa3b2' } }, '1–4 个任务；并发提高速度，也会增加服务端额度消耗。'),
+            ),
+          ) : h('div', { style: { color: '#9aa3b2', fontSize: '12px' } }, '此提供商还没有渠道。'),
         )
       }
 
@@ -2004,6 +2393,18 @@ function versionsOf(jobId) {
               h('label', { style: S.row },
                 h('input', { type: 'checkbox', checked: config.plannerEnabled !== false, onChange: e => save({ plannerEnabled: e.target.checked }) }),
                 h('span', { style: { fontSize: '13px' } }, '每轮自动规划配图（前台只写正文）'),
+              ),
+            ),
+            h('div', { style: S.row },
+              h('label', { style: S.row },
+                h('input', { type: 'checkbox', checked: config.smartImageSelection !== false, onChange: e => save({ smartImageSelection: e.target.checked }) }),
+                h('span', { style: { fontSize: '13px' } }, '智能决定是否配图（不合适时跳过并说明原因）'),
+              ),
+            ),
+            h('div', { style: S.row },
+              h('label', { style: S.row },
+                h('input', { type: 'checkbox', checked: config.characterAutoUpdate !== false, disabled: Number(config.tavernApi?.apiVersion) < 2, onChange: e => save({ characterAutoUpdate: e.target.checked }) }),
+                h('span', { style: { fontSize: '13px', opacity: Number(config.tavernApi?.apiVersion) < 2 ? .65 : 1 } }, Number(config.tavernApi?.apiVersion) < 2 ? '自动记录明确的永久外貌变化（需要 Tavern API v2）' : '自动记录明确的永久外貌变化'),
               ),
             ),
             h('div', { style: S.row },
@@ -2671,11 +3072,57 @@ function versionsOf(jobId) {
       /** 工作流：导入、查看、LoRA 管理。 */
       function workflowCard() {
         const list = data.workflows || []
+        const simple = Object.assign({ template: 'checkpoint', checkpoint: '', unet: '', clip1: '', clip2: '', vae: '', loras: [], steps: 24, cfg: 7, sampler: 'euler', scheduler: 'normal', width: 832, height: 1216, seed: '' }, config.comfySimple || {})
+        function updateSimple(patch) {
+          const next = Object.assign({}, simpleDraft || simple, patch)
+          if (patch.template === 'flux' && simpleInfo) {
+            if (!simpleInfo.fluxUnets?.includes(next.unet)) next.unet = simpleInfo.fluxUnets?.[0] || ''
+            next.clip1 = next.clip1 || simpleInfo.dualClips1?.find(name => /t5/i.test(name)) || ''
+            next.clip2 = next.clip2 || simpleInfo.dualClips2?.find(name => /clip[_ -]?l/i.test(name)) || ''
+            if (!next.vae) next.vae = simpleInfo.vaes?.find(name => /(?:^|[\\/])ae(?:[._-]|$)/i.test(name)) || ''
+          }
+          if (patch.template === 'anima' && simpleInfo) {
+            if (!simpleInfo.animaUnets?.includes(next.unet)) next.unet = simpleInfo.animaUnets?.[0] || ''
+            next.clip1 = next.clip1 || simpleInfo.clips?.find(name => /qwen/i.test(name)) || ''
+            if (!next.vae) next.vae = simpleInfo.vaes?.find(name => /qwen[_ -]?image[_ -]?vae/i.test(name)) || ''
+          }
+          setSimpleConfigDraft(next)
+        }
+        async function refreshSimpleInfo() {
+          setSimpleLoading(true); setSimpleNote('正在读取 ComfyUI 节点和模型列表…')
+          try {
+            const info = await post('/comfy-simple-info', {})
+            if (!info?.ok) throw new Error(info?.error || 'ComfyUI 没有返回节点信息')
+            setSimpleInfo(info)
+            const draft = simpleConfigDraft || simple
+            const next = Object.assign({}, draft)
+            if (!next.checkpoint && info.checkpoints?.length) next.checkpoint = info.checkpoints[0]
+            if (draft.template === 'anima') {
+              if (!info.animaUnets?.includes(next.unet)) next.unet = info.animaUnets?.[0] || ''
+            } else if (draft.template === 'flux') {
+              if (!info.fluxUnets?.includes(next.unet)) next.unet = info.fluxUnets?.[0] || ''
+            } else if (!next.unet && info.unets?.length) next.unet = info.unets[0]
+            if (!next.clip1 && draft.template === 'flux') next.clip1 = info.dualClips1?.find(name => /t5/i.test(name)) || ''
+            if (!next.clip2 && draft.template === 'flux') next.clip2 = info.dualClips2?.find(name => /clip[_ -]?l/i.test(name)) || ''
+            if (!next.clip1 && draft.template === 'anima') next.clip1 = info.clips?.find(name => /qwen/i.test(name)) || ''
+            if (!next.vae && draft.template === 'flux') next.vae = info.vaes?.find(name => /(?:^|[\\/])ae(?:[._-]|$)/i.test(name)) || ''
+            if (!next.vae && draft.template === 'anima') next.vae = info.vaes?.find(name => /qwen[_ -]?image[_ -]?vae/i.test(name)) || ''
+            setSimpleConfigDraft(next); setSimpleNote('已读取；模型列表来自当前 ComfyUI')
+            setLoraList(Array.isArray(info.loras) ? info.loras : [])
+          } catch (e) { setSimpleNote('读取失败：' + (e?.message ?? e)) }
+          finally { setSimpleLoading(false) }
+        }
+        const simpleDraft = simpleConfigDraft || simple
+        const setTemplate = value => { updateSimple({ template: value }); save({ comfyMode: 'simple', comfySimple: Object.assign({}, simpleDraft, { template: value }) }) }
+        const simpleSupport = simpleInfo?.templates?.[simpleDraft.template]
+        const options = (values, value, onChange, placeholder) => h('select', { value: value || '', style: Object.assign({}, S.input, { minWidth: '180px', flex: 1 }), onChange: e => onChange(e.target.value) },
+          !values?.length ? h('option', { value: '' }, placeholder || '先刷新模型列表') : null,
+          (values || []).map(item => h('option', { key: item, value: item }, item)))
         // 判定"读到的详情是不是当前这张"：file 或 id 任一匹配即可（file 由前端补进来）
         const detail = (wfDetail && (String(wfDetail.file ?? '') === String(wfOpen) || String(wfDetail.__id ?? '') === String(wfOpen))) ? wfDetail : null
 
-        async function openWorkflow(file) {
-          if (wfOpen === file) { setWfOpen(''); setWfDetail(null); return }
+        async function openWorkflow(file, force = false) {
+          if (!force && wfOpen === file) { setWfOpen(''); setWfDetail(null); return }
           setWfOpen(file); setWfDetail(null); setWfNote('读取中…')
           try {
             const r = await post('/workflow-bindings', { file })
@@ -2801,6 +3248,69 @@ function versionsOf(jobId) {
         const ta = Object.assign({}, S.input, { width: '100%', minHeight: '110px', fontFamily: 'ui-monospace, Consolas, monospace', fontSize: '11px', lineHeight: '1.5', resize: 'vertical', boxSizing: 'border-box' })
 
         return h('div', { style: S.card },
+          h('div', { style: { padding: '12px', marginBottom: '12px', borderRadius: '10px', background: 'rgba(106,168,255,.08)', border: '1px solid rgba(106,168,255,.35)' } },
+            h('div', { style: { fontSize: '14px', fontWeight: 700, marginBottom: '8px' } }, 'ComfyUI 生成方式'),
+            h('div', { style: Object.assign({}, S.row, { alignItems: 'stretch' }) },
+              h('label', { style: { fontSize: '12px', fontWeight: 600, minWidth: '92px', paddingTop: '7px' } }, '模式'),
+              h('select', { value: config.comfyMode === 'simple' ? 'simple' : 'workflow', style: Object.assign({}, S.input, { minWidth: '220px', flex: 1 }), onChange: e => save({ comfyMode: e.target.value }) },
+                h('option', { value: 'workflow' }, '工作流模式（当前默认）'), h('option', { value: 'simple' }, '简单模式（不需要 JSON）'))),
+            config.comfyMode === 'simple' ? h('div', { style: { marginTop: '10px' } },
+              h('div', { style: { fontSize: '12px', color: '#d6deea', marginBottom: '8px' } }, '从 ComfyUI 读取实际可用的模型与节点；此操作只读取信息，不会提交生成任务。'),
+              h('div', { style: Object.assign({}, S.row, { alignItems: 'stretch' }) },
+                h('label', { style: { fontSize: '12px', fontWeight: 600, minWidth: '92px', paddingTop: '7px' } }, '模板'),
+                h('select', { value: simpleDraft.template || 'checkpoint', style: Object.assign({}, S.input, { minWidth: '220px', flex: 1 }), onChange: e => updateSimple({ template: e.target.value }) },
+                  h('option', { value: 'checkpoint' }, 'Checkpoint（SD / SDXL）'), h('option', { value: 'flux' }, 'Flux'), h('option', { value: 'anima' }, 'Anima')),
+                h('button', { style: buttonStyle, onClick: refreshSimpleInfo, disabled: simpleLoading }, simpleLoading ? '读取中…' : '刷新模型列表'),
+                h('button', { style: Object.assign({}, buttonStyle, { borderColor: 'rgba(139,212,139,.65)', color: '#8bd48b', fontWeight: 600 }), onClick: async () => { const r = await save({ comfyMode: 'simple', comfySimple: simpleDraft }); if (r) { setSimpleConfigDraft(null); setSimpleNote('简单模式设置已保存') } } }, '保存简单模式设置')),
+              simpleNote ? h('div', { style: { fontSize: '12px', color: /失败|不可用/.test(simpleNote) ? '#ff8d8d' : '#b5c6dc', marginTop: '7px' } }, simpleNote) : null,
+              simpleSupport?.reason ? h('div', { role: 'status', style: { marginTop: '8px', padding: '9px 10px', color: '#ffd08a', background: 'rgba(255,190,90,.10)', border: '1px solid rgba(255,190,90,.35)', borderRadius: '8px', fontSize: '12px', lineHeight: 1.5 } }, simpleSupport.reason) : null,
+              ['checkpoint', 'flux', 'anima'].includes(simpleDraft.template) ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '10px' } },
+                simpleDraft.template === 'checkpoint'
+                  ? h('div', { style: Object.assign({}, S.row, { alignItems: 'stretch' }) }, h('label', { style: { fontSize: '12px', fontWeight: 600, minWidth: '92px', paddingTop: '7px' } }, 'Checkpoint'),
+                      simpleInfo?.checkpoints?.length ? options(simpleInfo.checkpoints, simpleDraft.checkpoint, value => updateSimple({ checkpoint: value })) : h('input', { style: Object.assign({}, S.input, { flex: 1 }), value: simpleDraft.checkpoint || '', placeholder: '刷新列表后选择', onChange: e => updateSimple({ checkpoint: e.target.value }) }))
+                  : h('div', { style: Object.assign({}, S.row, { alignItems: 'stretch' }) }, h('label', { style: { fontSize: '12px', fontWeight: 600, minWidth: '92px', paddingTop: '7px' } }, simpleDraft.template === 'anima' ? 'Anima 扩散模型' : 'Flux UNet'),
+                      (simpleDraft.template === 'anima' ? simpleInfo?.animaUnets : (simpleDraft.template === 'flux' ? simpleInfo?.fluxUnets : simpleInfo?.unets))?.length ? options(simpleDraft.template === 'anima' ? simpleInfo.animaUnets : (simpleDraft.template === 'flux' ? simpleInfo.fluxUnets : simpleInfo.unets), simpleDraft.unet, value => updateSimple({ unet: value })) : h('input', { style: Object.assign({}, S.input, { flex: 1 }), value: simpleDraft.unet || '', placeholder: '刷新列表后选择', onChange: e => updateSimple({ unet: e.target.value }) })),
+                simpleDraft.template === 'flux' ? h('div', { style: Object.assign({}, S.row, { alignItems: 'stretch' }) },
+                  h('label', { style: { fontSize: '12px', fontWeight: 600, minWidth: '92px', paddingTop: '7px' } }, '双 CLIP（T5 / CLIP-L）'),
+                  options(simpleInfo?.dualClips1, simpleDraft.clip1, value => updateSimple({ clip1: value }), '选择 T5-XXL'),
+                  options(simpleInfo?.dualClips2, simpleDraft.clip2, value => updateSimple({ clip2: value }), '选择 CLIP-L')) : null,
+                simpleDraft.template === 'checkpoint' ? h('div', { style: Object.assign({}, S.row, { alignItems: 'stretch' }) },
+                  h('label', { style: { fontSize: '12px', fontWeight: 600, minWidth: '92px', paddingTop: '7px' } }, '外置 VAE（可选）'),
+                  h('select', { value: simpleDraft.vae || '', style: Object.assign({}, S.input, { minWidth: '180px', flex: 1 }), onChange: e => updateSimple({ vae: e.target.value }) },
+                    h('option', { value: '' }, '使用 Checkpoint 内置 VAE'), (simpleInfo?.vaes || []).map(item => h('option', { key: item, value: item }, item)))) : null,
+                simpleDraft.template === 'anima' ? h('div', { style: Object.assign({}, S.row, { alignItems: 'stretch' }) },
+                  h('label', { style: { fontSize: '12px', fontWeight: 600, minWidth: '92px', paddingTop: '7px' } }, 'Anima Qwen CLIP'),
+                  simpleInfo?.clips?.length ? options(simpleInfo.clips, simpleDraft.clip1, value => updateSimple({ clip1: value })) : h('input', { style: Object.assign({}, S.input, { flex: 1 }), value: simpleDraft.clip1 || '', placeholder: '刷新列表后选择', onChange: e => updateSimple({ clip1: e.target.value }) })) : null,
+                ['flux', 'anima'].includes(simpleDraft.template) ? h('div', { style: Object.assign({}, S.row, { alignItems: 'stretch' }) },
+                  h('label', { style: { fontSize: '12px', fontWeight: 600, minWidth: '92px', paddingTop: '7px' } }, 'VAE'),
+                  simpleInfo?.vaes?.length ? h('select', { value: simpleDraft.vae || '', style: Object.assign({}, S.input, { minWidth: '180px', flex: 1 }), onChange: e => updateSimple({ vae: e.target.value }) },
+                    h('option', { value: '' }, simpleDraft.template === 'anima' ? '自动选择 qwen_image_vae' : '自动选择 ae.safetensors'), simpleInfo.vaes.map(item => h('option', { key: item, value: item }, item))) : h('input', { style: Object.assign({}, S.input, { flex: 1 }), value: simpleDraft.vae || '', placeholder: '刷新列表后选择', onChange: e => updateSimple({ vae: e.target.value }) })) : null,
+                h('div', { style: Object.assign({}, S.row, { alignItems: 'stretch' }) },
+                  h('label', { style: { fontSize: '12px', fontWeight: 600, minWidth: '92px', paddingTop: '7px' } }, '步数 / CFG'),
+                  h('input', { type: 'number', min: 1, max: 200, value: simpleDraft.steps ?? 24, style: Object.assign({}, S.input, { width: '90px' }), onChange: e => updateSimple({ steps: e.target.value }) }),
+                  h('input', { type: 'number', step: '0.1', min: 0, max: 100, value: simpleDraft.cfg ?? (simpleDraft.template === 'flux' ? 3.5 : 7), style: Object.assign({}, S.input, { width: '90px' }), onChange: e => updateSimple({ cfg: e.target.value }) }),
+                  h('label', { style: { fontSize: '12px', fontWeight: 600, paddingTop: '7px' } }, '采样器'), options(simpleInfo?.samplers, simpleDraft.sampler, value => updateSimple({ sampler: value }))),
+                h('div', { style: Object.assign({}, S.row, { alignItems: 'stretch' }) },
+                  h('label', { style: { fontSize: '12px', fontWeight: 600, minWidth: '92px', paddingTop: '7px' } }, '调度器 / 尺寸'), options(simpleInfo?.schedulers, simpleDraft.scheduler, value => updateSimple({ scheduler: value })),
+                  h('input', { type: 'number', min: 64, max: 8192, step: 8, value: simpleDraft.width ?? 832, 'aria-label': '宽度', style: Object.assign({}, S.input, { width: '82px' }), onChange: e => updateSimple({ width: e.target.value }) }),
+                  h('span', { style: { paddingTop: '7px' } }, '×'),
+                  h('input', { type: 'number', min: 64, max: 8192, step: 8, value: simpleDraft.height ?? 1216, 'aria-label': '高度', style: Object.assign({}, S.input, { width: '82px' }), onChange: e => updateSimple({ height: e.target.value }) })),
+                h('div', { style: { fontSize: '11px', color: '#bac7d7', paddingLeft: '92px' } }, '宽高按 8 像素倍数生效（其他数值自动取最近值）；简单模式固定输出 ' + (simpleDraft.width || 832) + ' × ' + (simpleDraft.height || 1216) + ' 像素，工作流模式的画幅设置不会覆盖它。'),
+                h('div', { style: Object.assign({}, S.row, { alignItems: 'stretch' }) },
+                  h('label', { style: { fontSize: '12px', fontWeight: 600, minWidth: '92px', paddingTop: '7px' } }, '固定种子'),
+                  h('input', { type: 'number', min: 0, max: 140737488355327, value: simpleDraft.seed ?? '', placeholder: '留空则每张随机', style: Object.assign({}, S.input, { width: '220px' }), onChange: e => updateSimple({ seed: e.target.value }) }),
+                  h('span', { style: { fontSize: '11px', color: '#bac7d7', paddingTop: '7px' } }, '只读取已保存的固定种子；默认每张随机')),
+                h('div', { style: { padding: '9px', border: '1px solid rgba(120,140,170,.3)', borderRadius: '8px' } },
+                  h('div', { style: { fontSize: '12px', fontWeight: 600, marginBottom: '7px' } }, 'LoRA（按当前模板的模型路径连接）'),
+                  (simpleDraft.loras || []).map((lora, index) => h('div', { key: index, style: Object.assign({}, S.row, { marginBottom: '6px' }) },
+                    h('input', { type: 'checkbox', checked: lora.enabled !== false, 'aria-label': '启用 LoRA', onChange: e => updateSimple({ loras: simpleDraft.loras.map((item, i) => i === index ? Object.assign({}, item, { enabled: e.target.checked }) : item) }) }),
+                    simpleInfo?.loras?.length ? options(simpleInfo.loras, lora.name, value => updateSimple({ loras: simpleDraft.loras.map((item, i) => i === index ? Object.assign({}, item, { name: value }) : item) }), '刷新列表后选择') : h('input', { style: Object.assign({}, S.input, { flex: 1 }), value: lora.name || '', placeholder: 'LoRA 名称', onChange: e => updateSimple({ loras: simpleDraft.loras.map((item, i) => i === index ? Object.assign({}, item, { name: e.target.value }) : item) }) }),
+                    h('input', { type: 'number', step: '0.05', value: lora.strengthModel ?? 1, 'aria-label': 'LoRA 模型权重', style: Object.assign({}, S.input, { width: '80px' }), onChange: e => updateSimple({ loras: simpleDraft.loras.map((item, i) => i === index ? Object.assign({}, item, { strengthModel: Number(e.target.value), strengthClip: Number(e.target.value) }) : item) }) }),
+                    h('button', { style: buttonStyle, onClick: () => updateSimple({ loras: simpleDraft.loras.filter((_, i) => i !== index) }) }, '移除'))),
+                  h('button', { style: buttonStyle, onClick: () => updateSimple({ loras: [...(simpleDraft.loras || []), { name: '', strengthModel: 1, strengthClip: 1, enabled: true }] }) }, '＋ 添加 LoRA'))
+              ) : null,
+            ) : null,
+          ),
           h('div', { style: { fontSize: '13px', marginBottom: '4px' } }, '工作流（' + list.length + ' 张）'),
           h('div', { style: { fontSize: '12px', color: '#9aa3b2', marginBottom: '10px' } },
             '从 ComfyUI 导出「API 格式」的 JSON 就能导进来，插件会自动认出正负面提示词、尺寸、步数、底模和 LoRA。',
@@ -2857,6 +3367,7 @@ function versionsOf(jobId) {
                         },
                       }, '设为默认'),
                   h('button', { style: Object.assign({}, buttonStyle, { fontSize: '12px', padding: '3px 12px' }), onClick: () => openWorkflow(wf.file) }, isOpen ? '△ 收起' : '✏️ 编辑 / LoRA'),
+                  h('button', { type: 'button', 'aria-label': '可视化编辑 ' + (wf.label || wf.id), style: Object.assign({}, buttonStyle, { fontSize: '12px', padding: '3px 12px', borderColor: 'rgba(106,168,255,.7)', color: '#a8caff' }), onClick: () => setWfGraphFile(wf.file) }, '可视化编辑'),
                   h('button', {
                     style: Object.assign({}, buttonStyle, { fontSize: '12px', padding: '3px 12px' }),
                     title: '重命名这张',
@@ -3325,12 +3836,20 @@ function versionsOf(jobId) {
        * 三件都办好了就自己消失。
        */
       function SetupGuide() {
-        const hasUrl = Boolean(String(config.comfyUrl ?? '').trim())
-        const online = Boolean(comfyStatus?.ok)
-        const hasWorkflow = (data.workflows ?? []).some(w => !w.error)
+        const external = imageBackend !== 'comfyui'
+        const hasUrl = external ? Boolean(String(selectedChannel?.baseUrl ?? '').trim()) : Boolean(String(config.comfyUrl ?? '').trim())
+        const online = external ? externalConnected : Boolean(comfyStatus?.ok)
+        const simpleMode = !external && config.comfyMode === 'simple'
+        const simple = config.comfySimple || {}
+        const simpleTemplate = String(simple.template || 'checkpoint')
+        const simpleModel = simpleTemplate === 'checkpoint' ? simple.checkpoint : simple.unet
+        const simpleCapability = simpleInfo?.templates?.[simpleTemplate]
+        const simpleReady = Boolean(String(simpleModel || '').trim()) && (!simpleCapability || simpleCapability.available === true)
+        const hasWorkflow = external || (simpleMode ? simpleReady : (data.workflows ?? []).some(w => !w.error))
         const hasModel = Boolean(config.plannerEnabled !== false)
         // 前两步没做完才显示
         if (hasUrl && online && hasWorkflow) return null
+        if (external && hasUrl && hasWorkflow && hasModel && (!externalStatus || externalStatus.status === 'configured' || externalConnected)) return null
         const step = (n, text, done, hint) => h('div', { style: { display: 'flex', alignItems: 'flex-start', gap: '8px', marginBottom: '6px' } },
           h('span', {
             style: {
@@ -3346,11 +3865,14 @@ function versionsOf(jobId) {
         )
         return h('div', { style: Object.assign({}, S.card, { border: '1px solid rgba(226,185,59,.45)' }) },
           h('div', { style: { fontSize: '13px', fontWeight: 600, marginBottom: '8px', color: '#e2b93b' } }, '还没配置好 —— 三步就能用'),
-          step(1, '填 ComfyUI 地址并测试连接', hasUrl && online,
-            online ? ('已连上 ' + (comfyStatus?.version ? 'ComfyUI ' + comfyStatus.version : 'ComfyUI')) : '在「生图规划」标签页上面的「生图后端」里填，然后点「测试连接与鉴权」'),
-          step(2, '导入一个工作流并设为默认', hasWorkflow,
-            '在「画风」标签页里，点「📥 导入工作流」，选 ComfyUI 用 API 格式导出的 JSON'),
-          step(3, '选规划模型（不选就跟随 Tavern 后台模型）', hasModel,
+          step(1, external ? '配置图像提供商渠道' : '填 ComfyUI 地址并测试连接', external ? hasUrl : hasUrl && online,
+            external ? (online ? '渠道探测成功。' : externalStatus?.checking ? '正在探测渠道…' : externalStatus?.status === 'configured' ? ('已配置但无法安全探测：' + (externalStatus.message || '请在服务商侧确认模型与权限。')) : externalStatus ? ('探测未通过：' + (externalStatus.message || externalStatus.error || '检查地址和鉴权。')) : '在「生图规划」标签页选择提供商，填写 API 地址、模型和鉴权，然后保存并测试。') : (online ? ('已连上 ' + (comfyStatus?.version ? 'ComfyUI ' + comfyStatus.version : 'ComfyUI')) : '在「生图规划」标签页上面的「生图后端」里填，然后点「测试连接与鉴权」')),
+          external ? null : simpleMode
+            ? step(2, '选择简单模式模板和模型', simpleReady,
+                simpleCapability?.reason || '在「画风」标签页打开简单模式、刷新模型列表并选择模型；不需要导入 JSON。')
+            : step(2, '导入一个工作流并设为默认', hasWorkflow,
+                '在「画风」标签页里，点「📥 导入工作流」，选 ComfyUI 用 API 格式导出的 JSON；也可以切换到简单模式而不导入 JSON。'),
+          step(external ? 2 : 3, '选规划模型（不选就跟随 Tavern 后台模型）', hasModel,
             '在「生图规划」标签页的「规划模型」下拉里选；想画 NSFW 就选自己的渠道模型'),
         )
       }
@@ -3459,10 +3981,100 @@ function versionsOf(jobId) {
         )
       }
 
+      function PromptPresetCard() {
+        const optStyle = { color: '#12161c', background: '#e9eef6' }
+        const library = Array.isArray(config.promptPresetLibrary) ? config.promptPresetLibrary : []
+        const saved = Array.isArray(config.promptPresets) ? config.promptPresets : []
+        const draftStorageKey = 'dsh-tavern-comfy-prompt-draft-v1'
+        const readDraft = () => {
+          try {
+            const cached = JSON.parse(window.localStorage?.getItem(draftStorageKey) || 'null')
+            return Array.isArray(cached) && cached.length <= 60 ? cached : saved
+          } catch { return saved }
+        }
+        const [draft, setDraftState] = React.useState(readDraft)
+        const setDraft = next => {
+          const value = typeof next === 'function' ? next(draft) : next
+          setDraftState(value)
+          try { window.localStorage?.setItem(draftStorageKey, JSON.stringify(value)) } catch {}
+        }
+        const [importText, setImportText] = React.useState('')
+        const [message, setMessage] = React.useState('')
+        const [manualPositive, setManualPositive] = React.useState(config.promptManualPositive || '')
+        const [manualNegative, setManualNegative] = React.useState(config.promptManualNegative || '')
+        const [quality, setQuality] = React.useState(Number(config.jpegQuality || 88))
+        const [background, setBackground] = React.useState(config.jpegBackground || '#ffffff')
+        const activeId = String(config.activePromptPreset || '')
+        const active = library.concat(draft).find(item => String(item.id) === activeId)
+        const edit = (i, key, value) => setDraft(draft.map((item, n) => n === i ? Object.assign({}, item, { [key]: value }) : item))
+        const addCopy = profile => {
+          const next = draft.concat([{ id: 'custom-' + Date.now(), name: (profile?.name || '提示词预设') + ' 副本', positive: profile?.positive || '', negative: profile?.negative || '', enabled: true }])
+          setDraft(next); save({ promptPresets: next, activePromptPreset: next[next.length - 1].id }); setMessage('副本已创建，可继续编辑。')
+        }
+        const addBlank = () => {
+          const next = draft.concat([{ id: 'custom-' + Date.now(), name: '自定义提示词', positive: '', negative: '', enabled: true }])
+          setDraft(next); save({ promptPresets: next, activePromptPreset: next[next.length - 1].id }); setMessage('已创建空白预设。')
+        }
+        const importPresets = () => {
+          try {
+            const parsed = JSON.parse(importText), incoming = Array.isArray(parsed) ? parsed : [parsed]
+            if (!incoming.length || incoming.length > 60 || incoming.some(p => !p || typeof p !== 'object' || Array.isArray(p))) throw new Error('需提供 1–60 个预设对象')
+            const next = draft.concat(incoming.map((p, i) => Object.assign({}, p, { id: 'import-' + Date.now() + '-' + i }))).slice(0, 60)
+            setDraft(next); setImportText(''); setMessage('导入完成，请保存预设。')
+          } catch (error) { setMessage('导入失败：' + (error?.message || 'JSON 格式不正确')) }
+        }
+        const exportPresets = () => {
+          const url = URL.createObjectURL(new Blob([JSON.stringify(draft, null, 2)], { type: 'application/json' }))
+          const link = document.createElement('a'); link.href = url; link.download = 'dsh-prompt-presets.json'; link.click(); URL.revokeObjectURL(url)
+        }
+        const area = height => Object.assign({}, S.input, { width: '100%', minHeight: height, boxSizing: 'border-box', fontFamily: 'ui-monospace, Consolas, monospace', fontSize: '12px', lineHeight: '1.5', resize: 'vertical' })
+        return h('div', { style: S.card },
+          h('div', { style: { fontSize: '14px', fontWeight: 600, marginBottom: '5px' } }, '专业提示词预设'),
+          h('div', { style: { fontSize: '12px', color: '#9aa3b2', marginBottom: '9px' } }, '按后端使用标签、自然语言或混合格式；预设包含构图、光线、材质与风格指导。脸部一致性需要参考图，预设本身不保证跨图一致。'),
+          h('div', { style: S.row },
+            h('label', { style: S.label }, '提示词格式'),
+            h('select', { value: config.promptMode || 'auto', style: S.input, onChange: e => save({ promptMode: e.target.value }) },
+              h('option', { value: 'auto', style: optStyle }, '自动'), h('option', { value: 'tags', style: optStyle }, '标签'), h('option', { value: 'natural', style: optStyle }, '自然语言'), h('option', { value: 'mixed', style: optStyle }, '混合')),
+            h('span', { style: { fontSize: '11px', color: '#9aa3b2' } }, '当前：' + (config.promptEffectiveFormat || 'mixed')),
+          ),
+          h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '6px', marginTop: '8px' } }, library.map(profile => h('button', { key: profile.id, style: Object.assign({}, buttonStyle, { borderColor: activeId === profile.id ? '#6aa8ff' : undefined }), onClick: () => save({ activePromptPreset: profile.id }) }, (activeId === profile.id ? '● ' : '○ ') + profile.name))),
+          h('div', { style: Object.assign({}, S.row, { marginTop: '7px' }) }, h('button', { style: buttonStyle, disabled: draft.length >= 60, onClick: addBlank }, '新建空白预设'), h('button', { style: buttonStyle, onClick: () => save({ activePromptPreset: '' }) }, '不使用预设')),
+          draft.map((p, i) => h('div', { key: p.id || i, style: { padding: '9px', marginTop: '8px', border: '1px solid rgba(120,140,170,.25)', borderRadius: '8px' } },
+            h('div', { style: S.row }, h('input', { type: 'radio', name: 'dsh-prompt-preset', checked: activeId === String(p.id), onChange: () => save({ activePromptPreset: String(p.id) }) }), h('input', { value: p.name || '', style: Object.assign({}, S.input, { flex: 1 }), onChange: e => edit(i, 'name', e.target.value) }), h('button', { style: buttonStyle, onClick: () => { const next = draft.filter((_, n) => n !== i); setDraft(next); save({ promptPresets: next, activePromptPreset: activeId === String(p.id) ? '' : activeId }) } }, '删除')),
+            h('div', { style: { fontSize: '11px', color: '#9aa3b2', margin: '5px 0 3px' } }, '正面指导'), h('textarea', { 'aria-label': '预设正面指导 ' + (p.name || i + 1), value: p.positive || '', style: area('60px'), onChange: e => edit(i, 'positive', e.target.value) }),
+            h('div', { style: { fontSize: '11px', color: '#9aa3b2', margin: '5px 0 3px' } }, '负面指导'), h('textarea', { 'aria-label': '预设负面指导 ' + (p.name || i + 1), value: p.negative || '', style: area('42px'), onChange: e => edit(i, 'negative', e.target.value) }),
+          )),
+          h('div', { style: Object.assign({}, S.row, { marginTop: '8px' }) },
+            h('button', { style: buttonStyle, onClick: () => addCopy(active || library[1]) }, '复制当前预设'),
+            h('button', { style: buttonStyle, onClick: async () => {
+              const result = await save({ promptPresets: draft })
+              if (result) { try { window.localStorage?.removeItem(draftStorageKey) } catch {}; setMessage('预设已保存。') }
+              else setMessage('保存失败。')
+            } }, '保存预设'),
+            h('button', { style: buttonStyle, onClick: exportPresets }, '导出 JSON')),
+          h('textarea', { value: importText, placeholder: '粘贴单个预设对象或 JSON 数组', style: Object.assign({}, area('48px'), { marginTop: '7px' }), onChange: e => setImportText(e.target.value) }),
+          h('button', { style: Object.assign({}, buttonStyle, { marginTop: '5px' }), onClick: importPresets }, '导入 JSON'),
+          active ? h('div', { style: { marginTop: '8px', padding: '8px', background: 'rgba(255,255,255,.035)', borderRadius: '7px', fontSize: '12px' } },
+            h('div', { style: { color: '#9aa3b2' } }, '正面预览'), h('div', { style: { whiteSpace: 'pre-wrap' } }, config.promptPreviewPositive || active.positive || ''),
+            h('div', { style: { color: '#9aa3b2', marginTop: '5px' } }, '负面预览'), h('div', { style: { whiteSpace: 'pre-wrap' } }, config.promptPreviewNegative || active.negative || '')) : null,
+          h('div', { style: { borderTop: '1px solid rgba(120,140,170,.2)', marginTop: '10px', paddingTop: '9px' } },
+            h('div', { style: { fontSize: '12px', marginBottom: '4px' } }, '手动提示词覆盖'),
+            h('textarea', { value: manualPositive, placeholder: '附加到所有正面提示词', style: area('42px'), onChange: e => setManualPositive(e.target.value) }),
+            h('textarea', { value: manualNegative, placeholder: '附加到所有负面提示词', style: Object.assign({}, area('38px'), { marginTop: '4px' }), onChange: e => setManualNegative(e.target.value) }),
+            h('button', { style: Object.assign({}, buttonStyle, { marginTop: '5px' }), onClick: () => save({ promptManualPositive: manualPositive, promptManualNegative: manualNegative }) }, '保存手动覆盖')),
+          h('div', { style: { borderTop: '1px solid rgba(120,140,170,.2)', marginTop: '10px', paddingTop: '9px' } },
+            h('label', { style: { display: 'flex', alignItems: 'center', gap: '7px', fontSize: '12px' } }, h('input', { type: 'checkbox', checked: config.jpegOutput === true, onChange: e => save({ jpegOutput: e.target.checked }) }), '将 PNG 转为 JPEG（有损压缩）'),
+            h('div', { style: S.row }, h('label', { style: S.label }, '质量 50–100'), h('input', { type: 'number', min: 50, max: 100, value: quality, style: Object.assign({}, S.input, { width: '75px' }), onChange: e => setQuality(e.target.value) }), h('label', { style: S.label }, '透明底色'), h('input', { type: 'color', value: background, onChange: e => setBackground(e.target.value) }), h('button', { style: buttonStyle, onClick: () => save({ jpegQuality: quality, jpegBackground: background }) }, '保存')),
+            h('div', { style: { fontSize: '11px', color: '#9aa3b2' } }, '仅转换 PNG；GIF/WebP 或转换失败时保留原图并显示提示。')),
+          message ? h('div', { style: { fontSize: '12px', marginTop: '7px', color: '#6aa8ff' } }, message) : null,
+        )
+      }
+
       // ---- 工作流 ----
       function flowTab() {
         return h('div', null,
           stylePresetCard(),
+          h(PromptPresetCard),
           workflowCard(),
         )
       }
@@ -3481,7 +4093,7 @@ function versionsOf(jobId) {
               h('span', { style: S.label }, '远端版本'), h('span', null, version(pluginUpdateCheck?.latestVersion)),
             ),
             latestConfirmed ? h('div', { style: { fontSize: '12px', color: '#9aa3b2', marginTop: '8px' } }, '当前已是最新版本。') : null,
-            pluginUpdateLocal?.supported === false ? h('a', { href: 'https://github.com/weixinlll/dsh-tavern-comfy', target: '_blank', rel: 'noopener noreferrer', style: { display: 'inline-block', marginTop: '8px', color: '#8bb8ff' } }, '打开插件 GitHub 页面手动下载') : null,
+            pluginUpdateLocal?.supported === false ? h('a', { href: 'https://github.com/weixinlll/dsh-tavern-image', target: '_blank', rel: 'noopener noreferrer', style: { display: 'inline-block', marginTop: '8px', color: '#8bb8ff' } }, '打开插件 GitHub 页面手动下载') : null,
             h('div', { style: S.row },
               h('button', { style: buttonStyle, disabled: !supported || Boolean(pluginUpdatePending), onClick: () => { setPluginUpdateCheck(null); void checkPluginUpdate() } }, pluginUpdatePending === 'check' ? '正在检查…' : '检查更新'),
               h('button', { style: buttonStyle, disabled: !canUpdate || Boolean(pluginUpdatePending), onClick: applyPluginUpdate }, pluginUpdatePending === 'apply' ? '正在更新…' : '更新插件'),
@@ -3509,6 +4121,7 @@ function versionsOf(jobId) {
         tab === 'worldbook' ? worldbookTab() : null,
         tab === 'plugin-update' ? pluginUpdateTab() : null,
         h('div', { style: { fontSize: '11px', color: '#9aa3b2', marginTop: '14px' } }, '人物与服装修改后请点「保存人物库」。'),
+        wfGraphFile ? h(WorkflowGraphEditor, { file: wfGraphFile, post, onClose: () => setWfGraphFile(''), onSaved: () => { void openWorkflow(wfGraphFile, true) } }) : null,
       )
     }
     // ─────────────────────────────────────────────────────────────
@@ -3610,11 +4223,12 @@ function versionsOf(jobId) {
       try {
         // 默认：标记通道按配置走；规划通道读不到配置就先不开（免得每轮白跑一次模型）
         // 默认先按「开」处理：渲染器可能在配置读回来之前就被调用，第一次太保守会整条消息都不接管
-        const settings = { autoImageGen: true, plannerEnabled: true }
+        const settings = { autoImageGen: true, plannerEnabled: true, smartImageSelection: true }
         jsonFetch(`${BASE}/state`).then(state => {
           if (state?.config) {
             settings.autoImageGen = state.config.autoImageGen !== false
             settings.plannerEnabled = state.config.plannerEnabled !== false
+            settings.smartImageSelection = state.config.smartImageSelection !== false
           }
         }).catch(() => { /* 拿不到配置就安静退化成只在有标记时出图 */ })
 
@@ -3746,6 +4360,80 @@ function versionsOf(jobId) {
             return
           }
           reportHost('tavernui-attached', { apiVersion: ui.apiVersion })
+          if (ui.apiVersion >= 2 && typeof ui.registerPanel === 'function') {
+            function CharacterHistoryPanel({ gameId }) {
+              const [history, setHistory] = React.useState({ loading: true, snapshot: null })
+              const [busy, setBusy] = React.useState(false)
+              const [notice, setNotice] = React.useState('')
+              const requestEpoch = React.useRef(null)
+              if (!requestEpoch.current) requestEpoch.current = createHistoryRequestEpoch()
+              requestEpoch.current.activate(gameId)
+              React.useEffect(() => { setBusy(false); setNotice('') }, [gameId])
+              const refresh = React.useCallback(async () => {
+                if (!requestEpoch.current.isActive(gameId)) return
+                if (!gameId) { setHistory({ loading: false, snapshot: null, loadedGameId: '' }); return }
+                const token = requestEpoch.current.begin(gameId)
+                setHistory(current => Object.assign({}, current, { loading: true }))
+                try {
+                  const result = await jsonFetch(BASE + '/character-history?gameId=' + encodeURIComponent(gameId))
+                  if (requestEpoch.current.isCurrent(gameId, token)) setHistory(Object.assign({}, result, { loading: false, loadedGameId: gameId }))
+                } catch (error) {
+                  if (requestEpoch.current.isCurrent(gameId, token)) setHistory({ loading: false, error: String(error?.message ?? error), loadedGameId: gameId })
+                }
+              }, [gameId])
+              React.useEffect(() => {
+                void refresh()
+                return () => requestEpoch.current.invalidate(gameId)
+              }, [refresh, gameId])
+              const historyMatchesGame = history.loadedGameId === String(gameId ?? '')
+              const canRestore = historyMatchesGame && Number(history.currentTurn) > 0
+              const restore = async (index, expectedChange) => {
+                if (!canRestore || !requestEpoch.current.isActive(gameId)) return
+                const gameToken = requestEpoch.current.captureGame(gameId)
+                requestEpoch.current.begin(gameId)
+                setBusy(true); setNotice('')
+                try {
+                  await jsonFetch(BASE + '/character-history', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ gameId, changeIndex: index, expectedChange }) })
+                  if (!requestEpoch.current.isGameCurrent(gameId, gameToken)) return
+                  setNotice('已在当前正文版本记录恢复结果。')
+                  await refresh()
+                } catch (error) {
+                  if (requestEpoch.current.isGameCurrent(gameId, gameToken)) setNotice(String(error?.message ?? error))
+                } finally {
+                  if (requestEpoch.current.isGameCurrent(gameId, gameToken)) setBusy(false)
+                }
+              }
+              if (history.loading || !historyMatchesGame) return h('div', { style: { padding: '16px', color: '#9aa3b2' } }, '正在读取当前剧情线的角色历史…')
+              if (history.available === false) return h('div', { style: { padding: '16px', color: '#9aa3b2', lineHeight: 1.6 } }, history.reason || '角色历史需要 Tavern 插件接口 v2。')
+              const changes = Array.isArray(history.snapshot?.changes) ? history.snapshot.changes : []
+              return h('div', { style: { padding: '14px', color: '#e8edf5', overflowY: 'auto', height: '100%', boxSizing: 'border-box' } },
+                h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px', marginBottom: '12px' } },
+                  h('div', null,
+                    h('div', { style: { fontWeight: 600, fontSize: '14px' } }, '角色视觉历史'),
+                    h('div', { style: { fontSize: '11px', color: '#9aa3b2', marginTop: '4px' } }, '当前剧情线 · 最新快照' + (history.turn ? ' · 第 ' + history.turn + ' 轮' : '')),
+                  ),
+                  h('button', { type: 'button', onClick: refresh, style: { background: 'transparent', color: 'inherit', border: '1px solid rgba(255,255,255,.2)', borderRadius: '7px', padding: '5px 9px', cursor: 'pointer' } }, '刷新'),
+                ),
+                notice ? h('div', { role: 'status', style: { padding: '8px', marginBottom: '10px', borderRadius: '7px', background: 'rgba(84,198,235,.1)', color: '#bfeafa', fontSize: '12px' } }, notice) : null,
+                history.error ? h('div', { role: 'alert', style: { color: '#ff9b9b', fontSize: '12px' } }, history.error) : null,
+                !canRestore ? h('div', { style: { padding: '8px', marginBottom: '10px', borderRadius: '7px', background: 'rgba(255,212,128,.08)', color: '#ffd480', fontSize: '12px', lineHeight: 1.5 } }, '请先完成一轮结算或点击当前消息的生图按钮，确认轮次后再恢复。') : null,
+                !changes.length ? h('div', { style: { color: '#9aa3b2', fontSize: '12px', lineHeight: 1.6 } }, '当前剧情线还没有明确的永久外貌变化记录。') : indexedHistoryChanges(changes).map(({ change, index }) => {
+                  return h('article', { key: change.id + ':' + change.turn + ':' + index, style: { padding: '10px', marginBottom: '8px', border: '1px solid rgba(255,255,255,.12)', borderRadius: '9px', background: 'rgba(255,255,255,.025)' } },
+                    h('div', { style: { fontSize: '12px', fontWeight: 600 } }, (change.name || '角色') + ' · ' + (change.field || '外貌') + ' · 第 ' + (change.turn || '?') + ' 轮'),
+                    change.before ? h('div', { style: { fontSize: '12px', color: '#9aa3b2', marginTop: '6px' } }, '之前：' + change.before) : null,
+                    h('div', { style: { fontSize: '12px', marginTop: '5px' } }, '之后：' + (change.after || '已清除')),
+                    h('div', { style: { fontSize: '11px', color: '#9aa3b2', marginTop: '6px', lineHeight: 1.5 } }, (change.reason || '剧情明确变化') + (change.at ? ' · ' + new Date(change.at).toLocaleString() : '')),
+                    h('button', { type: 'button', disabled: busy || !canRestore, onClick: () => restore(index, change), style: { marginTop: '8px', background: 'transparent', color: '#bfeafa', border: '1px solid rgba(84,198,235,.35)', borderRadius: '7px', padding: '5px 9px', cursor: busy || !canRestore ? 'default' : 'pointer', opacity: busy || !canRestore ? .45 : 1 } }, '恢复到变化前'),
+                  )
+                }),
+                history.snapshot?.warning ? h('div', { style: { marginTop: '10px', color: '#ffd480', fontSize: '11px' } }, history.snapshot.warning) : null,
+              )
+            }
+            try {
+              const off = ui.registerPanel({ id: 'character-history', title: '角色历史', render: ({ gameId }) => h(CharacterHistoryPanel, { gameId }) })
+              owner.effect?.(() => off, 'dsh-tavern-comfy: character history panel')
+            } catch (error) { reportHost('character-history-panel-failed', { error: String(error?.message ?? error).slice(0, 160) }) }
+          }
           try {
             const off = ui.registerMessageAction({
               id: 'rphub-comfy-draw',
@@ -3764,6 +4452,8 @@ function versionsOf(jobId) {
                 if (typeof showToast === 'function') {
                   if (r && r.ok && r.attached) {
                     showToast('已提交 ' + r.attached + ' 张，出图后自动插进正文')
+                  } else if (r && r.ok && r.skipped) {
+                    showToast('本轮自动跳过配图：' + (r.reason || '没有合适的画面'))
                   } else {
                     showToast('生图没出画面：' + ((r && r.error) || '规划没有产出画面'))
                   }
@@ -3783,6 +4473,7 @@ function versionsOf(jobId) {
               render: ({ groups, gameId, turn, streaming }) => {
                 try {
                   if (streaming) return null            // 生成中不画，免得画出半句话
+                  if (settings.smartImageSelection) return h('span', { style: { display: 'none' } })
                   const prompt = String((groups && groups[0]) || '').trim()
                   if (!prompt) return null
                   return h(InlineImage, {

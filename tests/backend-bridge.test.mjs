@@ -14,12 +14,25 @@ function fixture(engine, options = {}) {
   const media = []
   const events = []
   let current = turn
-  let settled, removed
+  let settled, removed, timeline
+  const turnData = []
+  const config = Object.assign({ plannerEnabled: true, smartImageSelection: true, characterAutoUpdate: true }, options.config)
   const tavern = {
+    apiVersion: options.apiVersion ?? 1,
     promptSection() { return () => events.push('off-prompt') },
     onTurnSettled(handler) { settled = handler; return () => events.push('off-settled') },
+    onTimelineChanged(handler) { timeline = handler; return () => events.push('off-timeline') },
     onGameRemoved(handler) { removed = handler; return () => events.push('off-removed') },
     async getTurn() { return current },
+    async readTurnData({ turn: requested }) {
+      return turnData.filter(item => item.turn <= requested).at(-1) ?? null
+    },
+    async saveTurnData(input) {
+      if (input.textVersion && input.textVersion !== current.textVersion) throw new Error('stale textVersion')
+      const saved = { turn: input.turn, textVersion: input.textVersion || current.textVersion, data: input.data }
+      turnData.push(saved); events.push('turn-data:' + input.turn)
+      return { turn: saved.turn, textVersion: saved.textVersion }
+    },
     async list() { return media },
     async attach(input) {
       const item = { ...input.item, id: 'media-' + media.length, textVersion: input.textVersion }
@@ -37,11 +50,11 @@ function fixture(engine, options = {}) {
     },
   }
   const bridge = installTavernBridge({
-    tavern, engine, getConfig: () => ({ plannerEnabled: true }),
+    tavern, engine, getConfig: () => config,
     attachments: { saveImage: options.saveImage || (async () => ({ id: 'attachment' })) },
     readFileAsBytes: async () => new Uint8Array([1]),
   })
-  return { bridge, events, media, settled: value => settled(value), remove: () => removed({ gameId: 'game' }), change: value => { current = value } }
+  return { bridge, events, media, turnData, config, setConfig: patch => Object.assign(config, patch), settled: value => settled(value), remove: () => removed({ gameId: 'game' }), change: value => { current = value }, timeline: event => timeline?.({ gameId: 'game', ...event }) }
 }
 
 test('independent waits show the second completed image before a pending first image; same version deduplicates', async () => {
@@ -142,4 +155,149 @@ test('deleted completed media can be restored instead of being blocked by comple
   assert.equal(calls, 2)
   assert.equal(f.media[0].status, 'ready')
   f.bridge.dispose()
+})
+
+test('an explicit automatic skip is successful and creates no image attachment work', async () => {
+  let imagePosts = 0
+  let calls = 0
+  const f = fixture({ planMessage: async () => { calls++; return { plans: [], skipped: true, reason: '本轮主要是对话，没有新的视觉瞬间' } }, getJob: () => { imagePosts++; return null } })
+  try {
+    assert.deepEqual(await f.bridge.attachTurn(turn), { attached: 0, total: 0, skipped: true, reason: '本轮主要是对话，没有新的视觉瞬间' })
+    assert.deepEqual(await f.bridge.attachTurn(turn), { attached: 0, total: 0, skipped: true, reason: '本轮主要是对话，没有新的视觉瞬间' })
+    assert.equal(calls, 1)
+    assert.equal(imagePosts, 0)
+    assert.equal(f.media.length, 0)
+  } finally { f.bridge.dispose() }
+})
+
+test('malformed skip results report an error and do not hide it behind skipped=true', async () => {
+  const f = fixture({ planMessage: async () => ({ plans: [], skipped: true, error: 'skip decision conflicts with a draw' }), getJob: () => null })
+  try {
+    const result = await f.bridge.attachTurn(turn)
+    assert.match(result.error, /conflicts/)
+    assert.equal(result.skipped, undefined)
+  } finally { f.bridge.dispose() }
+})
+
+test('planner setting changes invalidate a cached automatic skip', async () => {
+  let calls = 0
+  const f = fixture({ planMessage: async () => { calls++; return { plans: [], skipped: true, reason: 'quiet' } }, getJob: () => null })
+  try {
+    await f.bridge.attachTurn(turn)
+    await f.bridge.attachTurn(turn)
+    assert.equal(calls, 1)
+    f.setConfig({ plannerCount: 4 })
+    await f.bridge.attachTurn(turn)
+    assert.equal(calls, 2)
+  } finally { f.bridge.dispose() }
+})
+
+test('timeline changes abort old image work and invalidate successful empty-plan cache', async () => {
+  let calls = 0
+  const f = fixture({
+    async planMessage() { calls++; if (calls === 1) return { plans: [], skipped: true, reason: 'quiet' }; return { plans: [image('first')] } },
+    getJob: () => ({ state: 'pending' }),
+  }, { apiVersion: 2 })
+  try {
+    await f.bridge.attachTurn(turn)
+    f.timeline({ kind: 'rollback', turn: 1 })
+    const task = f.bridge.attachTurn(turn)
+    const rejected = assert.rejects(task, /剧情线已变化/)
+    await until(() => f.media.length === 1)
+    f.timeline({ kind: 'undo-rollback', turn: 1 })
+    await rejected
+    assert.equal(calls, 2)
+    assert.ok(f.events.includes('remove:media-0'))
+  } finally { f.bridge.dispose() }
+})
+
+test('manual generation invalidates an automatic skip cache and bypasses smart selection', async () => {
+  const requests = []
+  const f = fixture({
+    async planMessage(input) {
+      requests.push(input)
+      return input.manual ? { plans: [image('manual')] } : { plans: [], skipped: true, reason: 'quiet' }
+    },
+    getJob: () => done('manual'),
+  })
+  try {
+    await f.bridge.attachTurn(turn)
+    const forced = await f.bridge.attachTurn({ ...turn, manual: true, count: 1 })
+    assert.equal(forced.attached, 1)
+    assert.equal(requests.length, 2)
+    assert.equal(requests[1].smartSelection, false)
+    await f.bridge.attachTurn(turn)
+    assert.equal(requests.length, 3, 'manual intent clears the prior automatic decision')
+  } finally { f.bridge.dispose() }
+})
+
+test('same-game turn history reads wait for the preceding planner snapshot save', async () => {
+  let releaseFirst
+  let firstStarted
+  const started = new Promise(resolve => { firstStarted = resolve })
+  const gate = new Promise(resolve => { releaseFirst = resolve })
+  const requests = []
+  const f = fixture({
+    async planMessage(input) {
+      requests.push(input)
+      if (input.turn === 1) { firstStarted(); await gate }
+      return { plans: [], characterSnapshot: { version: 1, characters: { role: { traits: { face: 'updated' } } }, changes: [] } }
+    },
+    getJob: () => null,
+  }, { apiVersion: 2 })
+  try {
+    const first = f.bridge.attachTurn(turn)
+    await started
+    const second = f.bridge.attachTurn({ ...turn, turn: 2 })
+    await delay(10)
+    assert.equal(requests.length, 1)
+    releaseFirst()
+    await Promise.all([first, second])
+    assert.deepEqual(requests[1].historySnapshot.characters.role.traits, { face: 'updated' })
+  } finally { releaseFirst(); f.bridge.dispose() }
+})
+
+test('API v2 stores character snapshots even when there are no images', async () => {
+  let request
+  const snapshot = { version: 1, characters: { role1: { traits: { face: 'short hair' } } }, changes: [{ turn: 1 }] }
+  const f = fixture({
+    async planMessage(input) { request = input; return { plans: [], skipped: true, reason: 'dialogue', characterSnapshot: snapshot } },
+    getJob: () => null,
+  }, { apiVersion: 2 })
+  try {
+    const result = await f.bridge.attachTurn(turn)
+    assert.equal(result.skipped, true)
+    assert.equal(request.characterUpdates, true)
+    assert.deepEqual(request.historySnapshot, null)
+    assert.equal(f.turnData.length, 1)
+    assert.equal(f.turnData[0].textVersion, turn.textVersion)
+    assert.deepEqual(f.turnData[0].data, snapshot)
+    assert.equal(f.media.length, 0)
+  } finally { f.bridge.dispose() }
+})
+
+test('manual draw explicitly forces images and never inherits the smart skip option', async () => {
+  let request
+  const pictures = [image('one'), image('two')]
+  const f = fixture({ async planMessage(input) { request = input; return { plans: pictures } }, getJob: id => done(id) })
+  try {
+    const result = await f.bridge.attachTurn({ ...turn, manual: true, count: 2 })
+    assert.equal(request.manual, true)
+    assert.equal(request.force, true)
+    assert.equal(request.smartSelection, false)
+    assert.equal(request.count, 2)
+    assert.equal(result.total, 2)
+    assert.equal(result.attached, 2)
+  } finally { f.bridge.dispose() }
+})
+
+test('API v1 reports history unavailable to the planner and never reads or saves snapshots', async () => {
+  let request
+  const f = fixture({ async planMessage(input) { request = input; return { plans: [] } }, getJob: () => null })
+  try {
+    await f.bridge.attachTurn(turn)
+    assert.equal(request.characterUpdates, false)
+    assert.equal(request.historySnapshot, null)
+    assert.equal(f.turnData.length, 0)
+  } finally { f.bridge.dispose() }
 })

@@ -1,15 +1,15 @@
-# dsh-tavern-comfy
+# dsh-tavern-image
 
-**给 DSH Tavern 用的本地 ComfyUI 场景生图插件**
+**给 DSH Tavern 用的多平台场景生图插件**
 
-正文写到哪，图就配到哪 —— 用你自己显卡上的 ComfyUI 画，不花钱、不限量、风格自己定。
+用本地 ComfyUI / SD WebUI，或自己配置的 NovelAI、OpenAI、Gemini 等渠道，把插图按剧情插进正文。GitHub 项目现名为 `dsh-tavern-image`；为了兼容已有安装、接口与配置，DSH 内部插件 ID 和数据目录继续使用 `dsh-tavern-comfy`，旧配置可直接使用。
 
 ```text
 你只管写故事          ─────────────────────────────────────────────┐
                                                                     │
   ①  这一轮正文写完                                                 │
   ②  后台另起一次模型调用：「配几张？插在哪句后面？画什么？」        │
-  ③  每解析出一张完整画面就提交 ComfyUI，继续规划后面的画面          │
+  ③  每解析出一张完整画面就提交生图渠道，继续规划后面的画面          │
   ④  Tavern 把图按锚点插进正文，并跟这版正文绑定                     │
                                                                     │
 ◄───────────────────────────────────────────────────────────────────┘
@@ -25,6 +25,11 @@
 
 - [三十秒看懂](#三十秒看懂)
 - [三分钟跑起来](#三分钟跑起来)
+- [多平台与渠道](#多平台与渠道)
+- [ComfyUI 简单模式](#comfyui-简单模式)
+- [智能配图、提示词风格与图片格式](#智能配图提示词风格与图片格式)
+- [人物视觉历史](#人物视觉历史)
+- [工作流可视化编辑](#工作流可视化编辑)
 - [为什么改用官方接口](#为什么改用官方接口)
 - [日常怎么用](#日常怎么用)
 - [两个开关，别搞混](#两个开关，别搞混)
@@ -49,19 +54,79 @@
 | 🎛 **前台不用管图** | 前台模型专心写故事；配几张、画什么，交给后台一次单独的规划调用 |
 | 🔌 **不打补丁** | 全部走 Tavern 公开接口，Tavern 更新不会再把图或按钮冲掉 |
 
-再做四步配置就能用：**连 ComfyUI → 导工作流 → 选规划模型 → 开自动配图**。往下就有。
+使用 ComfyUI 可以选择 **导入 API 工作流**，也可以打开**简单模式**后直接选择模板和模型；两种方式都不需要改 Tavern。使用远程平台：**选提供商 → 保存地址、模型和 API Key → 选规划模型 → 开自动配图**。
+
+## 多平台与渠道
+
+在 DSH Tavern 的 **设置 → 本地生图 → 生图规划 → 生图后端** 选择提供商。外部平台不需要导入 ComfyUI 工作流。
+
+| 提供商 | 接入方式 |
+|---|---|
+| ComfyUI | 原有 API 工作流、LoRA、Bearer / Basic 鉴权 |
+| NovelAI / 同协议第三方 | NAI 生图协议，读取 ZIP 图片，也支持兼容服务的图片响应 |
+| OpenAI / Images 兼容中转 | Images API；支持 Base64 和图片 URL 返回 |
+| Google Gemini 原生 | `generateContent` 图片响应 |
+| Banana / Gemini 聊天兼容中转 | `chat/completions`，读取图片内容或图片链接 |
+| Grok Images | xAI 图片接口 |
+| Seedream / 火山方舟 | Ark 图片接口 |
+| 百炼 Qwen-Image | DashScope 图片接口 |
+| SD WebUI / Forge | `sdapi/v1/txt2img`；服务端需要开启 API |
+
+每个平台可以新增多条渠道，分别保存名称、API 根地址、模型和鉴权。模型名可以直接输入平台提供的名称；中转服务需选择它实际兼容的协议。浏览器页面登录的账号不能直接当作 API Key 使用。复制渠道后需要填写副本自己的密钥。
+
+密钥只保存在本机插件的 `config.json`，设置接口返回“已保存”状态而不返回外部渠道密钥。留空会保留原密钥，点击清除后再保存才会删除。下载平台返回的图片链接时，不会把 API Key 带给图片服务器。
+
+“测试连接”只做不生成图片的探测；没有合适探测接口的平台会显示“已配置”，这不代表已成功生成。实际出图仍取决于账号的模型权限、额度及中转平台的协议实现。插件不会自动重试付费生成请求；重启中断的外部任务会提示手动重绘，避免重复计费。后台队列默认同时生成 2 张，可以调整为 1–4 张。
+
+平台协议依据：[OpenAI Images](https://developers.openai.com/api/reference/resources/images/methods/generate)、[Gemini 图片生成](https://ai.google.dev/gemini-api/docs/image-generation)、[Qwen-Image](https://www.alibabacloud.com/help/en/model-studio/qwen-image-generation-and-editing-api-reference)。交互参考 [st-chatu8 指定版本](https://github.com/damoshen123/st-chatu8/tree/50f0d200caea17c448e80432f1b54d65ed8ce9cd) 与 [柏宝绘](https://github.com/baibai-git/ST-BaiBai-Image)，宿主接入继续使用 DSH Tavern 的公开接口。
+
+## ComfyUI 简单模式
+
+在 **画风 → ComfyUI 生成方式** 选择「简单模式」，点「刷新模型列表」，再选模板和模型并保存。插件只读取 ComfyUI 的 `/object_info`；它不会把这一步当成试跑，也不会提交生成任务。
+
+内置模板按当前 ComfyUI 实际提供的节点、输入和模型选项启用：
+
+| 模板 | 适用模型 | 主要节点 |
+|---|---|---|
+| Checkpoint | SD / SDXL Checkpoint | `CheckpointLoaderSimple`、`EmptyLatentImage` |
+| Flux | Flux UNet、T5-XXL 与 CLIP-L 双编码器 | `UNETLoader`、`DualCLIPLoader`、`EmptySD3LatentImage`、`FluxGuidance` |
+| Anima | Anima 扩散模型、Qwen-3 0.6B 编码器和对应 VAE | `UNETLoader`、`CLIPLoader`、`EmptyLatentImage`、`KSampler` |
+
+Flux 会分别选择 `clip_name1` 的 T5-XXL 和 `clip_name2` 的 CLIP-L；两类模板都会筛选可识别的 Flux / Anima UNet。缺少模型或节点时会指出具体接口或模型类型。Anima 图按 [ComfyUI 官方 Anima Base 1.0 blueprint](https://github.com/Comfy-Org/workflow_templates/blob/main/packages/blueprints/src/comfyui_subgraph_blueprints/blueprints/text_to_image_anima_base_1_0.json) 使用原生节点，不加入额外 AuraFlow 采样节点，也不承诺支持任意自定义 Anima 节点包；模型清单和安装方法见 [ComfyUI 官方 Anima 指南](https://docs.comfy.org/tutorials/image/anima/anima)。Flux 会优先使用 `ae.safetensors`，Anima 会优先使用 `qwen_image_vae.safetensors`；找不到标准命名项时需要明确选择 VAE。Checkpoint 可使用内置 VAE 或选外置 VAE；支持的模板可加 LoRA。宽高按 8 像素倍数生效，空种子每张随机，填写种子则固定。简单模式可直接生成，不需要导入 JSON；它只影响 ComfyUI，远程渠道仍使用各自配置。
+
+切换到「工作流模式」后仍可使用导入的 API JSON。工作流库的「试跑」会明确使用所选工作流，即使当前生成方式选了简单模式。
+
+## 智能配图、提示词风格与图片格式
+
+默认开启智能选图。每轮结算后，规划模型可以决定生成 0 到设置上限张图；没有值得单独呈现的画面时会跳过，不会为了凑数出图。正文版本下方的 **🎨 生图** 按钮是手动强制配图，会要求生成配置的张数并重新规划，不受自动跳过决策限制；它也可以在自动规划关闭时使用。
+
+**生图规划 → 提示词风格** 提供自动、标签、自然语言和混合提示词模式，并可选择或自建视觉 profile。自动模式按渠道与 ComfyUI 模板选适合的表达方式；可为 profile 保存正面风格和负面约束。规划时把 profile 作为当前任务的指导，不会额外调用一次模型。**手动覆盖**会附加到各渠道的正面或负面提示词。
+
+可选开启「将 PNG 转为 JPEG」。质量范围为 50–100，透明区域会按所选背景色铺底；JPEG 本身及其他格式不会重复转换。该选项只转换 PNG，转换失败、图片超出安全限制或格式不支持时会保留原图并显示说明。默认关闭，保持渠道返回的原始格式。
+
+## 人物视觉历史
+
+Tavern 插件接口 v2 可为每条剧情线记录已知角色被正文明确确认的永久外貌变化，例如永久留疤、剪发或失明。插件只保存角色库已有 stable ID 的事实更新；衣着、姿势、临时伤痕等不会写入。数据通过 Tavern 每轮的 `readTurnData` / `saveTurnData` 保存为该轮正文版本的快照，不改写用户维护的人物库。
+
+在「角色历史」面板可查看当前剧情线的最新快照，并把某条变化恢复到变化前。恢复会在当前正文版本写入一条新的历史记录，不会删除后续记录。回退或切换正文版本后，插件读取 Tavern 为该轮、该版本提供的快照；历史作用域按 Tavern 的 `gameId` 与轮次隔离，分叉后的数据由宿主的分叉行为决定，插件不会自行把一条剧情线的后续更改复制到另一条线。Tavern API v1 不支持角色视觉历史及其自动记录；该功能在 v1 下关闭，其他插件功能仍按宿主可用接口工作。
+
+## 工作流可视化编辑
+
+进入 **画风 → 工作流库 → 可视化编辑**，可以查看节点连线、缩放和平移画布、拖动节点，并在右侧修改选中节点的文字、数字和开关参数。保存会更新原工作流并备份旧文件，节点位置也会记住。
+
+连线保留为只读；添加节点或重新连接仍在 ComfyUI 中完成后导入 API JSON。绑定到自动正负提示词、随机种子及尺寸的参数，在出图时仍由插件设置替换。LoRA 名称和强度的修改会同步到生成用的绑定。若同一文件已被别处修改，保存会提示重新打开，避免覆盖。
 
 ---
 
 ## 三分钟跑起来
 
-**前置**：你已经在用 DSH Desktop，并且 ComfyUI 能正常出图。
+**前置**：你已经在用 DSH Desktop，并且 ComfyUI 能正常出图，或持有生图平台的 API 地址与密钥。下面演示 ComfyUI 配置；远程平台见上面的“多平台与渠道”。
 
 ### 第 1 步 · 装插件
 
 ```bash
 cd ~/.dsh/profile-data/tavern/data/tools
-git clone https://github.com/weixinlll/dsh-tavern-comfy.git
+git clone https://github.com/weixinlll/dsh-tavern-image.git
 ```
 
 > Windows 上是 `%USERPROFILE%\.dsh\profile-data\tavern\data\tools`
@@ -88,7 +153,11 @@ API 根地址   [http://127.0.0.1:8188        ]
 
 就通了。设过密码的话，在这里选 Bearer Token 或 Basic 并填上。
 
-### 第 3 步 · 导入一个工作流
+### 第 3 步 · 选一种 ComfyUI 生成方式
+
+如果只想直接选模型，在「画风」页选择 **简单模式**，刷新列表，选 Checkpoint、Flux 或 Anima 模板与对应模型，保存即可。模型和节点支持情况来自当前 ComfyUI；具体模板要求见[简单模式说明](#comfyui-简单模式)。
+
+如果要自定义节点连线，则导入工作流：
 
 切到「**画风**」标签页 → **📥 导入工作流**。
 
@@ -104,7 +173,7 @@ API 根地址   [http://127.0.0.1:8188        ]
   正面 1 / 负面 1 / 尺寸 1 / 步数 1 / 底模 1 / LoRA 2
 ```
 
-识别错了就展开它，点「**✏️ 编辑 / LoRA**」当场改。最后**设为默认**。
+识别错了就展开它，点「**✏️ 编辑 / LoRA**」当场改。最后**设为默认**。使用简单模式时不需要导入 JSON。
 
 ### 第 4 步 · 选规划模型
 
@@ -446,7 +515,7 @@ workflows/*.json   你自己的工作流
 | | |
 |---|---|
 | **DSH Desktop** | `>=0.1.0-rc.8` `<0.2.0` |
-| **ComfyUI** | 本机或局域网内可访问即可 |
+| **生图后端** | 本机 / 局域网 ComfyUI、SD WebUI，或支持所选协议的远程 API |
 | **规划模型** | 需要能按 XML 格式输出；默认跟随 Tavern 后台模型 |
 
 ---
@@ -473,6 +542,27 @@ dsh-tavern-comfy/
 ---
 
 ## 版本记录
+
+**2.0.0**
+
+- 项目更名为 `dsh-tavern-image`，仓库和自动更新链接迁移到新地址；旧仓库地址的已安装副本仍可检查更新。
+- 保留 DSH 内部插件 ID、服务路由与本地数据目录，已有安装和用户配置无需迁移。
+- 汇总 1.3–1.4 期间新增的多平台生图、ComfyUI 简单模式与工作流可视化、智能配图、角色视觉历史、提示词/画风预设及 JPEG 转存功能。
+
+**1.4.0**
+
+- ComfyUI 增加按 `/object_info` 检查能力的简单模式，支持 Checkpoint、Flux 与符合原生模板要求的 Anima；可直接选择模型，不需要导入 JSON。
+- 自动配图增加智能选图，可选择跳过无独立画面的一轮；手动「🎨 生图」仍可强制规划出图。
+- 增加跨图像提供商的提示词表达模式与可编辑视觉 profile，并提供可选 PNG 转 JPEG、质量和透明底色设置；转换不适用或失败时保留原图。
+- Tavern 官方插件接口 v2 增加按剧情线和正文版本保存的角色视觉历史，只记录已知角色的明确永久外貌变化；支持查看与恢复，API v1 下关闭。
+- 更新第三方图像编解码器的许可证与发布文件清单。
+
+**1.3.0**
+
+- 新增 NovelAI、OpenAI Images、Gemini、聊天兼容中转、Grok、Seedream、Qwen-Image、SD WebUI / Forge 渠道。
+- 外部渠道单独保存配置与密钥；后台队列支持并发、取消和重复请求去重。
+- ComfyUI 工作流增加可视化节点图、参数编辑、布局保存与版本冲突检测。
+- 原有 ComfyUI 工作流、人物库、正文插图与 DSH Tavern 官方接口继续使用。
 
 **1.2.2**
 
